@@ -1,0 +1,12 @@
+session : aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+session-id : 42
+infobase : bbbbbbbb-cccc-dddd-eeee-ffffffffffff
+connection : cccccccc-dddd-eeee-ffff-000000000001
+process : dddddddd-eeee-ffff-0000-000000000002
+user-name : DOMAIN\ivanov
+host : PC-123
+app-id : 1CV8C
+started-at : 2026-08-11T10:20:30+03:00
+cpu-time-total : 1500
+memory-current : 1048576
+future-field : preserved

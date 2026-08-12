@@ -1,0 +1,6 @@
+cluster : 11111111-2222-3333-4444-555555555555
+host : srv-1c.example.local
+port : 1541
+name : Development cluster
+expiration-timeout : 0
+lifetime-limit : 0
