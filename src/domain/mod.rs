@@ -8,7 +8,7 @@ mod outcome;
 mod query;
 mod value;
 
-pub use auth::{AuthConfig, AuthMode, OsAuth, PasswordAuth, SecretString};
+pub use auth::{AuthConfig, AuthMode, PasswordAuth, SecretString};
 pub use error::DomainError;
 pub use fields::{
     FieldDefinition, FieldRegistry, FieldUnit, FilterOperator, SortDirection, SortKey,

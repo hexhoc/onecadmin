@@ -33,13 +33,6 @@ tracing-appender = "=0.2.5"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "fmt", "local-time"] }
 unicode-width = "=0.2.2"
 uuid = { version = "1", features = ["serde", "v4"] }
-windows = { version = "=0.62.2", features = [
-    "Win32_Foundation",
-    "Win32_Security",
-    "Win32_Storage_FileSystem",
-    "Win32_System_Registry",
-    "Win32_System_Threading",
-] }
 zeroize = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
@@ -52,6 +45,10 @@ rstest = "=0.26.1"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+[profile.dev]
+opt-level = 0  # должно быть 0
+debug = true   # обязательно
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

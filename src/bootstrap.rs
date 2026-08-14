@@ -11,12 +11,8 @@ use crate::infrastructure::config::{
     AuthConfig as ConfigAuth, Config, ConfigError, ConfigStore, InfobaseAuthOverride,
 };
 use crate::infrastructure::rac::RacGateway;
-use crate::infrastructure::telemetry::{
-    JsonlAuditSink, SecretRedactor, init_logging_with_redactor,
-};
-use crate::infrastructure::windows::{
-    ConfigFileAcl, SystemWindowsIdentityProvider, WindowsConfigFileAcl, WindowsPaths,
-};
+use crate::infrastructure::telemetry::{SecretRedactor, init_logging_with_redactor};
+use crate::infrastructure::windows::WindowsPaths;
 use crate::tui::{TuiOptions, run as run_tui};
 
 pub fn main_entry() -> ExitCode {
@@ -63,15 +59,13 @@ async fn run(cli: Cli) -> ExitCode {
         }
     };
 
-    let acl = WindowsConfigFileAcl::default();
-    let store =
-        match ConfigStore::new(config_path).map(|store| store.with_acl_protector(acl.clone())) {
-            Ok(store) => store,
-            Err(error) => {
-                write_config_error(&error);
-                return AppExitCode::InvalidInput.into();
-            }
-        };
+    let store = match ConfigStore::new(config_path) {
+        Ok(store) => store,
+        Err(error) => {
+            write_config_error(&error);
+            return AppExitCode::InvalidInput.into();
+        }
+    };
 
     let config = match load_or_create_config(&store) {
         Ok(config) => config,
@@ -81,19 +75,10 @@ async fn run(cli: Cli) -> ExitCode {
         }
     };
 
-    if store.path().exists()
-        && let crate::infrastructure::windows::AclRestriction::NotApplied { reason } =
-            acl.restrict_to_current_user(store.path())
-    {
-        write_stderr(
-            format!("Предупреждение: ACL конфигурации не ограничен: {reason}\n").as_bytes(),
-        );
-    }
-
     let redactor = redactor_from_config(&config);
     let log_filter = config.settings.log_level.as_str().to_ascii_lowercase();
     let _logging_guard =
-        match init_logging_with_redactor(paths.logs_directory(), &log_filter, redactor.clone()) {
+        match init_logging_with_redactor(paths.logs_directory(), &log_filter, redactor) {
             Ok(guard) => guard,
             Err(error) => {
                 write_stderr(
@@ -107,13 +92,7 @@ async fn run(cli: Cli) -> ExitCode {
         .timeout
         .map(|value| Duration::from_secs(value.get()))
         .unwrap_or_else(|| Duration::from_secs(config.settings.timeout_seconds));
-    let audit = JsonlAuditSink::new(paths.audit_file(), redactor);
-    let services = AppServices::from_infrastructure(
-        store,
-        RacGateway::new(timeout),
-        audit,
-        SystemWindowsIdentityProvider,
-    );
+    let services = AppServices::from_infrastructure(store, RacGateway::new(timeout));
 
     let cancellation = CancellationToken::new();
     let signal_cancellation = cancellation.clone();

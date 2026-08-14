@@ -184,10 +184,6 @@ pub(crate) fn config_auth_to_domain(auth: &config::AuthConfig) -> Result<AuthCon
             AuthConfig::password(user, SecretString::new(password.expose_secret()))
                 .map_err(AppError::from_domain)
         }
-        config::AuthRef::Os { user, os_user } => {
-            AuthConfig::os(Some(user.to_owned()), os_user.map(str::to_owned))
-                .map_err(AppError::from_domain)
-        }
         config::AuthRef::None => Ok(AuthConfig::none()),
     }
 }
@@ -203,10 +199,6 @@ fn config_infobase_auth_to_domain(
             let auth = match item.as_ref() {
                 config::AuthRef::Password { user, password } => {
                     AuthConfig::password(user, SecretString::new(password.expose_secret()))
-                        .map_err(AppError::from_domain)?
-                }
-                config::AuthRef::Os { user, os_user } => {
-                    AuthConfig::os(Some(user.to_owned()), os_user.map(str::to_owned))
                         .map_err(AppError::from_domain)?
                 }
                 config::AuthRef::None => AuthConfig::none(),
@@ -240,15 +232,6 @@ pub fn auth_to_rac_credentials(auth: &AuthConfig) -> Result<RacCredentials, AppE
             })?;
             Ok(RacCredentials::password(user, password.expose_secret()))
         }
-        AuthConfig::Os(_) => {
-            let user = auth.user().filter(|user| !user.is_empty()).ok_or_else(|| {
-                AppError::config(
-                    "missing_auth_user",
-                    "В учетных данных OS-режима отсутствует имя администратора 1С",
-                )
-            })?;
-            Ok(RacCredentials::os(user))
-        }
     }
 }
 
@@ -271,18 +254,6 @@ pub(crate) fn domain_auth_to_config(auth: &AuthConfig) -> Result<config::AuthCon
             Ok(config::AuthConfig::password(
                 user,
                 config::Password::new(password.expose_secret()),
-            ))
-        }
-        AuthConfig::Os(_) => {
-            let user = auth.user().filter(|user| !user.is_empty()).ok_or_else(|| {
-                AppError::invalid(
-                    "missing_auth_user",
-                    "Для OS-аутентификации требуется имя администратора 1С",
-                )
-            })?;
-            Ok(config::AuthConfig::os(
-                user,
-                auth.expected_os_user().map(str::to_owned),
             ))
         }
     }
@@ -328,21 +299,6 @@ pub(crate) fn domain_override_to_config(
                 uuid,
                 auth.user,
                 auth.password,
-            ))
-        }
-        AuthConfig::Os(_) => {
-            let auth = domain_auth_to_config(item.auth())?;
-            let config::AuthConfig::Os(auth) = auth else {
-                return Err(AppError::internal(
-                    "auth_conversion_failed",
-                    "Не удалось преобразовать учетные данные OS-режима",
-                ));
-            };
-            Ok(config::InfobaseAuthOverride::os(
-                name,
-                uuid,
-                auth.user,
-                auth.os_user,
             ))
         }
     }

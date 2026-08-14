@@ -74,7 +74,6 @@ pub struct AppError {
     code: &'static str,
     message: String,
     target_errors: Vec<TargetError>,
-    audit_error: Option<String>,
 }
 
 impl AppError {
@@ -85,7 +84,6 @@ impl AppError {
             code,
             message: message.into(),
             target_errors: Vec::new(),
-            audit_error: None,
         }
     }
 
@@ -207,12 +205,6 @@ impl AppError {
     }
 
     #[must_use]
-    pub fn with_audit_error(mut self, message: impl Into<String>) -> Self {
-        self.audit_error = Some(message.into());
-        self
-    }
-
-    #[must_use]
     pub const fn category(&self) -> AppErrorCategory {
         self.category
     }
@@ -241,20 +233,11 @@ impl AppError {
     pub fn target_errors(&self) -> &[TargetError] {
         &self.target_errors
     }
-
-    #[must_use]
-    pub fn audit_error(&self) -> Option<&str> {
-        self.audit_error.as_deref()
-    }
 }
 
 impl fmt::Display for AppError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}: {}", self.code, self.message)?;
-        if let Some(audit_error) = &self.audit_error {
-            write!(formatter, "; ошибка аудита: {audit_error}")?;
-        }
-        Ok(())
+        write!(formatter, "{}: {}", self.code, self.message)
     }
 }
 
@@ -298,7 +281,6 @@ pub(crate) const fn target_kind_from_rac(kind: RacErrorKind) -> TargetErrorKind 
         RacErrorKind::Dns | RacErrorKind::ConnectionRefused => TargetErrorKind::Unavailable,
         RacErrorKind::Timeout => TargetErrorKind::Timeout,
         RacErrorKind::Auth => TargetErrorKind::Authentication,
-        RacErrorKind::UnsupportedAuth => TargetErrorKind::UnsupportedAuth,
         RacErrorKind::ProtocolIncompatible | RacErrorKind::CommandSyntax => {
             TargetErrorKind::Protocol
         }

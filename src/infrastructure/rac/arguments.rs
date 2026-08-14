@@ -9,7 +9,6 @@ use super::process::RacArguments;
 pub enum RacAuthMode {
     None,
     Password,
-    Os,
 }
 
 pub struct RacSecret(Zeroizing<String>);
@@ -57,9 +56,6 @@ pub enum RacCredentials {
         username: String,
         password: RacSecret,
     },
-    Os {
-        username: String,
-    },
 }
 
 impl RacCredentials {
@@ -74,24 +70,17 @@ impl RacCredentials {
         }
     }
 
-    pub fn os(username: impl Into<String>) -> Self {
-        Self::Os {
-            username: username.into(),
-        }
-    }
-
     pub const fn mode(&self) -> RacAuthMode {
         match self {
             Self::None => RacAuthMode::None,
             Self::Password { .. } => RacAuthMode::Password,
-            Self::Os { .. } => RacAuthMode::Os,
         }
     }
 
     pub fn username(&self) -> Option<&str> {
         match self {
             Self::None => None,
-            Self::Password { username, .. } | Self::Os { username } => Some(username),
+            Self::Password { username, .. } => Some(username),
         }
     }
 }
@@ -104,10 +93,6 @@ impl fmt::Debug for RacCredentials {
                 .debug_struct("RacCredentials::Password")
                 .field("username", username)
                 .field("password", &"<redacted>")
-                .finish(),
-            Self::Os { username } => formatter
-                .debug_struct("RacCredentials::Os")
-                .field("username", username)
                 .finish(),
         }
     }
@@ -295,10 +280,6 @@ fn push_credentials(
             push_public_option(arguments, scope.user_option(), username);
             push_secret_option(arguments, scope.password_option(), password);
         }
-        RacCredentials::Os { username } => {
-            // Omitting the password makes RAC use the current Windows identity.
-            push_public_option(arguments, scope.user_option(), username);
-        }
     }
 }
 
@@ -341,25 +322,6 @@ mod tests {
         assert!(!format!("{credentials:?}").contains(secret));
         assert!(!format!("{invocation:?}").contains(secret));
         assert!(!invocation.to_string().contains(secret));
-    }
-
-    #[test]
-    fn os_authentication_never_adds_password_option() {
-        let credentials = RacCredentials::os("windows-admin");
-        let arguments =
-            RacArgumentBuilder::new().infobase_list("server:1545", Uuid::nil(), &credentials);
-        let rendered: Vec<_> = arguments
-            .raw()
-            .iter()
-            .map(|argument| argument.to_string_lossy())
-            .collect();
-
-        assert!(
-            rendered
-                .iter()
-                .any(|value| value.starts_with("--cluster-user="))
-        );
-        assert!(!rendered.iter().any(|value| value.contains("pwd")));
     }
 
     #[test]

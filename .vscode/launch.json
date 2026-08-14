@@ -1,0 +1,19 @@
+{
+    "configurations": [
+        {
+            "name": "(Windows) Launch",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/target/debug/onecadmin.exe",
+            "args": [
+                "session",
+                "list"
+            ],            
+            "stopAtEntry": false,
+            "cwd": "${fileDirname}",
+            "environment": [],
+            "console": "internalConsole"
+        }
+    
+    ]
+}

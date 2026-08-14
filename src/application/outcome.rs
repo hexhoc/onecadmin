@@ -63,9 +63,6 @@ pub struct ActionItemOutcome<T> {
     pub target: T,
     pub status: ActionStatus,
     pub error: Option<ActionError>,
-    /// The action status describes the RAC effect. Audit failure is kept
-    /// separately so callers can report that the effect may already exist.
-    pub audit_error: Option<ActionError>,
 }
 
 impl<T> ActionItemOutcome<T> {
@@ -75,7 +72,6 @@ impl<T> ActionItemOutcome<T> {
             target,
             status: ActionStatus::Success,
             error: None,
-            audit_error: None,
         }
     }
 
@@ -85,7 +81,6 @@ impl<T> ActionItemOutcome<T> {
             target,
             status: ActionStatus::Failed,
             error: Some(error),
-            audit_error: None,
         }
     }
 
@@ -95,14 +90,7 @@ impl<T> ActionItemOutcome<T> {
             target,
             status: ActionStatus::Cancelled,
             error: Some(ActionError::new("cancelled", "Операция отменена")),
-            audit_error: None,
         }
-    }
-
-    #[must_use]
-    pub fn with_audit_error(mut self, error: ActionError) -> Self {
-        self.audit_error = Some(error);
-        self
     }
 }
 
@@ -112,7 +100,6 @@ pub struct ActionMeta {
     pub succeeded: usize,
     pub failed: usize,
     pub cancelled: usize,
-    pub audit_failed: usize,
     pub partial: bool,
 }
 
@@ -137,10 +124,6 @@ impl<T> ActionOutcome<T> {
             .iter()
             .filter(|item| item.status == ActionStatus::Cancelled)
             .count();
-        let audit_failed = items
-            .iter()
-            .filter(|item| item.audit_error.is_some())
-            .count();
         let attempted = items.len();
         let partial = succeeded > 0 && failed + cancelled > 0;
         Self {
@@ -150,7 +133,6 @@ impl<T> ActionOutcome<T> {
                 succeeded,
                 failed,
                 cancelled,
-                audit_failed,
                 partial,
             },
         }
@@ -161,8 +143,6 @@ impl<T> ExitCodePolicy for ActionOutcome<T> {
     fn app_exit_code(&self) -> AppExitCode {
         if self.meta.cancelled > 0 {
             AppExitCode::Cancelled
-        } else if self.meta.audit_failed > 0 {
-            AppExitCode::Internal
         } else if self.meta.attempted == 0 {
             AppExitCode::NoObjects
         } else if self.meta.succeeded > 0 && self.meta.failed > 0 {

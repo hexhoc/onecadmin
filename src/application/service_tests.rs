@@ -15,7 +15,6 @@ use crate::infrastructure::config;
 use crate::infrastructure::rac::{
     RacAuthMode, RacCandidate, RacCredentials, RacError, RacErrorKind, RacRecord, SearchPolicy,
 };
-use crate::infrastructure::telemetry::AuditEvent;
 
 use super::*;
 
@@ -214,36 +213,6 @@ impl RacPort for FakeRac {
     }
 }
 
-#[derive(Clone, Default)]
-struct FakeAudit {
-    events: Arc<Mutex<Vec<AuditEvent>>>,
-}
-
-#[async_trait]
-impl AuditPort for FakeAudit {
-    async fn record(&self, event: AuditEvent) -> Result<(), PortError> {
-        self.events
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(event);
-        Ok(())
-    }
-}
-
-#[derive(Clone, Copy)]
-struct FakeIdentity;
-
-#[async_trait]
-impl IdentityPort for FakeIdentity {
-    async fn current_identity(&self) -> Result<String, PortError> {
-        Ok(r"DOMAIN\operator".to_owned())
-    }
-
-    async fn verify_expected(&self, _expected: String) -> Result<String, PortError> {
-        Ok(r"DOMAIN\operator".to_owned())
-    }
-}
-
 fn cluster_record(uuid: Uuid, ras_address: &str) -> RacRecord {
     let mut record = RacRecord::new();
     record.insert("cluster", uuid.to_string());
@@ -295,13 +264,8 @@ fn raw_snapshot(entries: &[(&str, &str, Uuid)], infobase_password: bool) -> RawC
     }
 }
 
-fn services(
-    snapshot: RawConfigSnapshot,
-    rac: FakeRac,
-    audit: FakeAudit,
-    loads: Arc<AtomicUsize>,
-) -> AppServices {
-    AppServices::new(FakeConfig { snapshot, loads }, rac, audit, FakeIdentity)
+fn services(snapshot: RawConfigSnapshot, rac: FakeRac, loads: Arc<AtomicUsize>) -> AppServices {
+    AppServices::new(FakeConfig { snapshot, loads }, rac)
 }
 
 fn source(alias: &str, cluster_uuid: Uuid) -> ClusterSource {
@@ -335,12 +299,7 @@ async fn session_fanout_returns_partial_data_and_joined_infobase() {
         state.clusters.insert("bad.local:1545".to_owned(), bad_uuid);
         state.unavailable.insert("bad.local:1545".to_owned());
     }
-    let app = services(
-        snapshot,
-        rac,
-        FakeAudit::default(),
-        Arc::new(AtomicUsize::new(0)),
-    );
+    let app = services(snapshot, rac, Arc::new(AtomicUsize::new(0)));
 
     let outcome = app
         .list_sessions(&SessionListRequest::default(), &CancellationToken::new())
@@ -360,7 +319,6 @@ async fn destructive_guard_runs_before_config_or_rac_io() {
     let app = services(
         raw_snapshot(&[], false),
         FakeRac::default(),
-        FakeAudit::default(),
         Arc::clone(&loads),
     );
 
@@ -377,12 +335,7 @@ async fn destructive_guard_runs_before_config_or_rac_io() {
 #[tokio::test]
 async fn cluster_remove_never_treats_underscore_as_a_mask() {
     let snapshot = raw_snapshot(&[("prodX1", "good.local", Uuid::from_u128(1))], false);
-    let app = services(
-        snapshot,
-        FakeRac::default(),
-        FakeAudit::default(),
-        Arc::new(AtomicUsize::new(0)),
-    );
+    let app = services(snapshot, FakeRac::default(), Arc::new(AtomicUsize::new(0)));
 
     let error = app
         .prepare_cluster_remove("prod_1", &CancellationToken::new())
@@ -406,12 +359,7 @@ async fn credential_overrides_are_loaded_through_the_typed_snapshot() {
             "Accounting",
             Some(Uuid::from_u128(100)),
         ));
-    let app = services(
-        snapshot,
-        FakeRac::default(),
-        FakeAudit::default(),
-        Arc::new(AtomicUsize::new(0)),
-    );
+    let app = services(snapshot, FakeRac::default(), Arc::new(AtomicUsize::new(0)));
 
     let overrides = app
         .credential_overrides("DEV", &CancellationToken::new())
@@ -427,7 +375,7 @@ async fn credential_overrides_are_loaded_through_the_typed_snapshot() {
 }
 
 #[tokio::test]
-async fn session_kill_continues_after_item_error_and_audits_every_item() {
+async fn session_kill_continues_after_item_error() {
     let cluster_uuid = Uuid::from_u128(1);
     let first_id = Uuid::from_u128(10);
     let second_id = Uuid::from_u128(11);
@@ -440,13 +388,7 @@ async fn session_kill_continues_after_item_error_and_audits_every_item() {
             .insert("good.local:1545".to_owned(), cluster_uuid);
         state.failed_sessions.insert(first_id);
     }
-    let audit = FakeAudit::default();
-    let app = services(
-        snapshot,
-        rac.clone(),
-        audit.clone(),
-        Arc::new(AtomicUsize::new(0)),
-    );
+    let app = services(snapshot, rac.clone(), Arc::new(AtomicUsize::new(0)));
     let records = [first_id, second_id]
         .into_iter()
         .map(|id| SessionRecord::new(source("dev", cluster_uuid), SessionUuid::new(id)))
@@ -468,14 +410,6 @@ async fn session_kill_continues_after_item_error_and_audits_every_item() {
     assert_eq!(outcome.meta.succeeded, 1);
     assert_eq!(outcome.app_exit_code(), AppExitCode::PartialSuccess);
     assert_eq!(rac.state().terminated, vec![first_id, second_id]);
-    assert_eq!(
-        audit
-            .events
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len(),
-        2
-    );
 }
 
 #[tokio::test]
@@ -488,12 +422,7 @@ async fn connection_kill_keeps_pair_and_uses_matching_infobase_credentials() {
     rac.state()
         .clusters
         .insert("good.local:1545".to_owned(), cluster_uuid);
-    let app = services(
-        snapshot,
-        rac.clone(),
-        FakeAudit::default(),
-        Arc::new(AtomicUsize::new(0)),
-    );
+    let app = services(snapshot, rac.clone(), Arc::new(AtomicUsize::new(0)));
     let mut record = ConnectionRecord::new(
         source("dev", cluster_uuid),
         ConnectionUuid::new(connection_id),

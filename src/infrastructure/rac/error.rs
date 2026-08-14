@@ -11,7 +11,6 @@ pub enum RacErrorKind {
     ConnectionRefused,
     Timeout,
     Auth,
-    UnsupportedAuth,
     CommandSyntax,
     Parse,
     Cancelled,
@@ -28,7 +27,6 @@ impl RacErrorKind {
             Self::ConnectionRefused => "connection_refused",
             Self::Timeout => "timeout",
             Self::Auth => "auth",
-            Self::UnsupportedAuth => "unsupported_auth",
             Self::CommandSyntax => "command_syntax",
             Self::Parse => "parse",
             Self::Cancelled => "cancelled",
@@ -49,7 +47,6 @@ impl RacErrorKind {
             Self::ConnectionRefused => "сервер RAS отклонил подключение",
             Self::Timeout => "превышено время ожидания ответа RAC",
             Self::Auth => "ошибка аутентификации RAC",
-            Self::UnsupportedAuth => "выбранный режим аутентификации не поддерживается",
             Self::CommandSyntax => "RAC отклонил синтаксис команды",
             Self::Parse => "не удалось разобрать ответ RAC",
             Self::Cancelled => "операция RAC отменена",
@@ -155,23 +152,6 @@ impl std::error::Error for RacError {}
 
 pub fn classify_diagnostic(diagnostic: &str) -> RacErrorKind {
     let diagnostic = diagnostic.to_lowercase().replace('ё', "е");
-
-    if contains_any(
-        &diagnostic,
-        &[
-            "os authentication is not supported",
-            "windows authentication is not supported",
-            "authentication mode is not supported",
-            "unsupported authentication",
-            "unsupported auth",
-            "тип аутентификации не поддерживается",
-            "режим аутентификации не поддерживается",
-            "windows-аутентификация не поддерживается",
-            "аутентификация windows не поддерживается",
-        ],
-    ) {
-        return RacErrorKind::UnsupportedAuth;
-    }
 
     if contains_any(
         &diagnostic,
@@ -347,10 +327,6 @@ mod tests {
             (
                 "Подключение не установлено, т.к. конечный компьютер отверг запрос",
                 RacErrorKind::ConnectionRefused,
-            ),
-            (
-                "Windows authentication is not supported for this operation",
-                RacErrorKind::UnsupportedAuth,
             ),
             ("Unknown option --future", RacErrorKind::CommandSyntax),
             ("Истекло время ожидания операции", RacErrorKind::Timeout),

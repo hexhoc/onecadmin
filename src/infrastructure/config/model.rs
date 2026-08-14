@@ -262,7 +262,6 @@ impl Default for RacConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuthMode {
     Password,
-    Os,
     None,
 }
 
@@ -270,7 +269,6 @@ pub enum AuthMode {
 #[serde(tag = "mode", rename_all = "lowercase")]
 pub enum AuthConfig {
     Password(PasswordAuth),
-    Os(OsAuth),
     None(NoAuth),
 }
 
@@ -282,13 +280,6 @@ impl AuthConfig {
         })
     }
 
-    pub fn os(user: impl Into<String>, os_user: Option<String>) -> Self {
-        Self::Os(OsAuth {
-            user: user.into(),
-            os_user,
-        })
-    }
-
     pub fn none() -> Self {
         Self::None(NoAuth {})
     }
@@ -296,7 +287,6 @@ impl AuthConfig {
     pub fn mode(&self) -> AuthMode {
         match self {
             Self::Password(_) => AuthMode::Password,
-            Self::Os(_) => AuthMode::Os,
             Self::None(_) => AuthMode::None,
         }
     }
@@ -306,10 +296,6 @@ impl AuthConfig {
             Self::Password(auth) => AuthRef::Password {
                 user: &auth.user,
                 password: &auth.password,
-            },
-            Self::Os(auth) => AuthRef::Os {
-                user: &auth.user,
-                os_user: auth.os_user.as_deref(),
             },
             Self::None(_) => AuthRef::None,
         }
@@ -329,13 +315,6 @@ pub struct PasswordAuth {
     pub password: Password,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct OsAuth {
-    pub user: String,
-    pub os_user: Option<String>,
-}
-
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct NoAuth {}
@@ -345,10 +324,6 @@ pub enum AuthRef<'a> {
     Password {
         user: &'a str,
         password: &'a Password,
-    },
-    Os {
-        user: &'a str,
-        os_user: Option<&'a str>,
     },
     None,
 }
@@ -390,7 +365,6 @@ impl InfobaseAuthConfig {
 #[serde(tag = "mode", rename_all = "lowercase")]
 pub enum InfobaseAuthOverride {
     Password(PasswordInfobaseAuthOverride),
-    Os(OsInfobaseAuthOverride),
     None(NoneInfobaseAuthOverride),
 }
 
@@ -409,20 +383,6 @@ impl InfobaseAuthOverride {
         })
     }
 
-    pub fn os(
-        infobase: impl Into<String>,
-        infobase_uuid: Option<Uuid>,
-        user: impl Into<String>,
-        os_user: Option<String>,
-    ) -> Self {
-        Self::Os(OsInfobaseAuthOverride {
-            infobase: infobase.into(),
-            infobase_uuid,
-            user: user.into(),
-            os_user,
-        })
-    }
-
     pub fn none(infobase: impl Into<String>, infobase_uuid: Option<Uuid>) -> Self {
         Self::None(NoneInfobaseAuthOverride {
             infobase: infobase.into(),
@@ -433,7 +393,6 @@ impl InfobaseAuthOverride {
     pub fn infobase(&self) -> &str {
         match self {
             Self::Password(entry) => &entry.infobase,
-            Self::Os(entry) => &entry.infobase,
             Self::None(entry) => &entry.infobase,
         }
     }
@@ -441,7 +400,6 @@ impl InfobaseAuthOverride {
     pub fn infobase_uuid(&self) -> Option<Uuid> {
         match self {
             Self::Password(entry) => entry.infobase_uuid,
-            Self::Os(entry) => entry.infobase_uuid,
             Self::None(entry) => entry.infobase_uuid,
         }
     }
@@ -449,7 +407,6 @@ impl InfobaseAuthOverride {
     pub fn mode(&self) -> AuthMode {
         match self {
             Self::Password(_) => AuthMode::Password,
-            Self::Os(_) => AuthMode::Os,
             Self::None(_) => AuthMode::None,
         }
     }
@@ -459,10 +416,6 @@ impl InfobaseAuthOverride {
             Self::Password(entry) => AuthRef::Password {
                 user: &entry.user,
                 password: &entry.password,
-            },
-            Self::Os(entry) => AuthRef::Os {
-                user: &entry.user,
-                os_user: entry.os_user.as_deref(),
             },
             Self::None(_) => AuthRef::None,
         }
@@ -476,15 +429,6 @@ pub struct PasswordInfobaseAuthOverride {
     pub infobase_uuid: Option<Uuid>,
     pub user: String,
     pub password: Password,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct OsInfobaseAuthOverride {
-    pub infobase: String,
-    pub infobase_uuid: Option<Uuid>,
-    pub user: String,
-    pub os_user: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -578,13 +522,6 @@ fn validate_auth(auth: &AuthConfig, path: &str) -> Result<(), ValidationError> {
             validate_non_empty(&auth.user, format!("{path}.user"))?;
             validate_non_empty(auth.password.expose_secret(), format!("{path}.password"))
         }
-        AuthConfig::Os(auth) => {
-            validate_non_empty(&auth.user, format!("{path}.user"))?;
-            if let Some(os_user) = &auth.os_user {
-                validate_non_empty(os_user, format!("{path}.os_user"))?;
-            }
-            Ok(())
-        }
         AuthConfig::None(_) => Ok(()),
     }
 }
@@ -610,18 +547,6 @@ fn validate_overrides(
                     entry.password.expose_secret(),
                     format!("clusters.{alias}.infobase_auth.overrides[{index}].password"),
                 )?;
-            }
-            InfobaseAuthOverride::Os(entry) => {
-                validate_non_empty(
-                    &entry.user,
-                    format!("clusters.{alias}.infobase_auth.overrides[{index}].user"),
-                )?;
-                if let Some(os_user) = &entry.os_user {
-                    validate_non_empty(
-                        os_user,
-                        format!("clusters.{alias}.infobase_auth.overrides[{index}].os_user"),
-                    )?;
-                }
             }
             InfobaseAuthOverride::None(_) => {}
         }
@@ -813,11 +738,11 @@ mod tests {
                     "uuid-user",
                     Password::new("one"),
                 ),
-                InfobaseAuthOverride::os(
+                InfobaseAuthOverride::password(
                     "Production",
                     None,
                     "name-user",
-                    Some("DOMAIN\\user".to_owned()),
+                    Password::new("two"),
                 ),
             ],
         };

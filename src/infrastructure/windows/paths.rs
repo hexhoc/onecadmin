@@ -10,7 +10,6 @@ pub const APP_DIRECTORY_NAME: &str = "onecadmin";
 pub const LOG_DIRECTORY_NAME: &str = "logs";
 pub const CONFIG_FILE_NAME: &str = "config.yaml";
 pub const TECHNICAL_LOG_FILE_NAME: &str = "onecadmin.log";
-pub const AUDIT_FILE_NAME: &str = "audit.jsonl";
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum WindowsPathError {
@@ -69,10 +68,6 @@ impl WindowsPaths {
     pub fn technical_log_file(&self) -> PathBuf {
         self.logs_directory.join(TECHNICAL_LOG_FILE_NAME)
     }
-
-    pub fn audit_file(&self) -> PathBuf {
-        self.logs_directory.join(AUDIT_FILE_NAME)
-    }
 }
 
 pub fn default_config_path() -> Result<PathBuf, WindowsPathError> {
@@ -118,13 +113,6 @@ mod tests {
                 .join(APP_DIRECTORY_NAME)
                 .join(LOG_DIRECTORY_NAME)
                 .join(TECHNICAL_LOG_FILE_NAME)
-        );
-        assert_eq!(
-            paths.audit_file(),
-            local
-                .join(APP_DIRECTORY_NAME)
-                .join(LOG_DIRECTORY_NAME)
-                .join(AUDIT_FILE_NAME)
         );
     }
 

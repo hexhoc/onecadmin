@@ -41,7 +41,6 @@ impl fmt::Display for OutputFormat {
 pub enum AuthModeArg {
     None,
     Password,
-    Os,
 }
 
 /// Root command. An absent subcommand means that the TUI should be started.
@@ -221,7 +220,7 @@ pub struct ClusterAddArgs {
         long,
         value_enum,
         value_name = "MODE",
-        help = "Аутентификация кластера: none, password или os"
+        help = "Аутентификация кластера: none или password"
     )]
     pub auth: AuthModeArg,
 
@@ -241,7 +240,7 @@ pub struct ClusterAddArgs {
         long,
         value_enum,
         value_name = "MODE",
-        help = "Общая аутентификация информационных баз: none, password или os"
+        help = "Общая аутентификация информационных баз: none или password"
     )]
     pub infobase_auth: Option<AuthModeArg>,
 
@@ -259,29 +258,12 @@ pub struct ClusterAddArgs {
         help = "Общий пароль информационных баз (хранится в YAML открытым текстом)"
     )]
     pub infobase_password: Option<SecretString>,
-
-    #[arg(
-        long,
-        value_name = "DOMAIN\\USER",
-        help = "Ожидаемая текущая учетная запись Windows для OS-аутентификации"
-    )]
-    pub os_user: Option<String>,
 }
 
 impl ClusterAddArgs {
     pub fn validate(&self) -> Result<(), CliValidationError> {
         let _ = self.cluster_auth()?;
         let _ = self.infobase_auth()?;
-        let infobase_mode = self.infobase_auth.unwrap_or(AuthModeArg::None);
-        if self.os_user.is_some()
-            && self.auth != AuthModeArg::Os
-            && infobase_mode != AuthModeArg::Os
-        {
-            return Err(CliValidationError::new(
-                "invalid_auth",
-                "Параметр `--os-user` разрешен только при OS-аутентификации",
-            ));
-        }
         Ok(())
     }
 
@@ -299,11 +281,6 @@ impl ClusterAddArgs {
                     .clone()
                     .ok_or_else(|| missing_auth_option("--password", "password", "кластера"))?;
                 AuthConfig::password(user, password).map_err(CliValidationError::from)
-            }
-            AuthModeArg::Os => {
-                reject_present("--password", self.password.is_some(), "os")?;
-                AuthConfig::os(self.user.clone(), self.os_user.clone())
-                    .map_err(CliValidationError::from)
             }
         }
     }
@@ -330,15 +307,6 @@ impl ClusterAddArgs {
                     missing_auth_option("--infobase-password", "password", "информационных баз")
                 })?;
                 AuthConfig::password(user, password).map_err(CliValidationError::from)
-            }
-            AuthModeArg::Os => {
-                reject_present(
-                    "--infobase-password",
-                    self.infobase_password.is_some(),
-                    "os",
-                )?;
-                AuthConfig::os(self.infobase_user.clone(), self.os_user.clone())
-                    .map_err(CliValidationError::from)
             }
         }
     }

@@ -41,7 +41,6 @@ impl fmt::Debug for SecretString {
 pub enum AuthMode {
     None,
     Password,
-    Os,
 }
 
 #[derive(Clone, Eq, PartialEq, Zeroize)]
@@ -72,29 +71,10 @@ impl fmt::Debug for PasswordAuth {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Zeroize)]
-pub struct OsAuth {
-    user: Option<String>,
-    expected_os_user: Option<String>,
-}
-
-impl OsAuth {
-    #[must_use]
-    pub fn user(&self) -> Option<&str> {
-        self.user.as_deref()
-    }
-
-    #[must_use]
-    pub fn expected_os_user(&self) -> Option<&str> {
-        self.expected_os_user.as_deref()
-    }
-}
-
 #[derive(Clone, Eq, PartialEq)]
 pub enum AuthConfig {
     None,
     Password(PasswordAuth),
-    Os(OsAuth),
 }
 
 impl AuthConfig {
@@ -118,29 +98,11 @@ impl AuthConfig {
         Ok(Self::Password(PasswordAuth { user, password }))
     }
 
-    pub fn os(user: Option<String>, expected_os_user: Option<String>) -> Result<Self, DomainError> {
-        if user.as_deref().is_some_and(str::is_empty) {
-            return Err(DomainError::InvalidAuth {
-                reason: "user в OS-режиме не может быть пустым",
-            });
-        }
-        if expected_os_user.as_deref().is_some_and(str::is_empty) {
-            return Err(DomainError::InvalidAuth {
-                reason: "os_user в OS-режиме не может быть пустым",
-            });
-        }
-        Ok(Self::Os(OsAuth {
-            user,
-            expected_os_user,
-        }))
-    }
-
     #[must_use]
     pub const fn mode(&self) -> AuthMode {
         match self {
             Self::None => AuthMode::None,
             Self::Password(_) => AuthMode::Password,
-            Self::Os(_) => AuthMode::Os,
         }
     }
 
@@ -149,7 +111,6 @@ impl AuthConfig {
         match self {
             Self::None => None,
             Self::Password(auth) => Some(auth.user()),
-            Self::Os(auth) => auth.user(),
         }
     }
 
@@ -157,15 +118,7 @@ impl AuthConfig {
     pub fn password_secret(&self) -> Option<&SecretString> {
         match self {
             Self::Password(auth) => Some(auth.password()),
-            Self::None | Self::Os(_) => None,
-        }
-    }
-
-    #[must_use]
-    pub fn expected_os_user(&self) -> Option<&str> {
-        match self {
-            Self::Os(auth) => auth.expected_os_user(),
-            Self::None | Self::Password(_) => None,
+            Self::None => None,
         }
     }
 }
@@ -178,7 +131,6 @@ impl fmt::Debug for AuthConfig {
                 .debug_tuple("AuthConfig::Password")
                 .field(auth)
                 .finish(),
-            Self::Os(auth) => formatter.debug_tuple("AuthConfig::Os").field(auth).finish(),
         }
     }
 }
@@ -188,7 +140,6 @@ impl Zeroize for AuthConfig {
         match self {
             Self::None => {}
             Self::Password(auth) => auth.zeroize(),
-            Self::Os(auth) => auth.zeroize(),
         }
     }
 }
@@ -231,11 +182,7 @@ mod tests {
 
     #[test]
     fn auth_modes_do_not_fall_back_to_empty_passwords() {
-        let os = AuthConfig::os(None, Some("DOMAIN\\user".to_owned()))
-            .unwrap_or_else(|error| panic!("{error}"));
-
-        assert_eq!(os.mode(), AuthMode::Os);
-        assert!(os.password_secret().is_none());
         assert!(AuthConfig::password("user", SecretString::new("")).is_err());
+        assert_eq!(AuthConfig::none().mode(), AuthMode::None);
     }
 }

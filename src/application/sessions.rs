@@ -9,10 +9,9 @@ use crate::domain::{
     TargetError, TargetErrorKind,
 };
 use crate::infrastructure::rac::RacErrorKind;
-use crate::infrastructure::telemetry::{AuditContext, AuditEvent, AuditResult, audit_actions};
 
 use super::{
-    ActionError, ActionItemOutcome, ActionOutcome, ActionStatus, AppError, AppServices, Approval,
+    ActionError, ActionItemOutcome, ActionOutcome, AppError, AppServices, Approval,
     ClusterSelector, ConfiguredTarget, PreparedSessionKill, RacOptions, SessionKillOutcome,
     finish_target_results, normalize_session, resolved_query_spec, select_configured_targets,
 };
@@ -241,7 +240,6 @@ impl AppServices {
         options: &RacOptions,
         cancellation: &CancellationToken,
     ) -> Result<SessionKillOutcome, AppError> {
-        let windows_user = self.audit_user().await?;
         let snapshot = self.load_config_snapshot(cancellation).await?;
         let mut groups = BTreeMap::new();
         for (index, target) in plan.targets().iter().cloned().enumerate() {
@@ -256,7 +254,6 @@ impl AppServices {
                 targets,
                 plan.message(),
                 options,
-                &windows_user,
                 cancellation,
             )
         }))
@@ -275,7 +272,6 @@ impl AppServices {
         targets: Vec<(usize, SessionKillTarget)>,
         message: &str,
         options: &RacOptions,
-        windows_user: &str,
         cancellation: &CancellationToken,
     ) -> Vec<(usize, ActionItemOutcome<SessionKillTarget>)> {
         let Some(first) = targets.first().map(|(_, target)| target) else {
@@ -293,8 +289,6 @@ impl AppServices {
                         "cluster_snapshot_mismatch",
                         "Кластер отсутствует или изменился после создания снимка",
                     ),
-                    message,
-                    windows_user,
                 )
                 .await;
         };
@@ -302,19 +296,14 @@ impl AppServices {
             Ok(live) => live,
             Err(error) => {
                 return self
-                    .fail_session_group(
-                        targets,
-                        ActionError::new(error.code(), error.message),
-                        message,
-                        windows_user,
-                    )
+                    .fail_session_group(targets, ActionError::new(error.code(), error.message))
                     .await;
             }
         };
 
         let mut outcomes = Vec::with_capacity(targets.len());
         for (index, target) in targets {
-            let mut outcome = if cancellation.is_cancelled() {
+            let outcome = if cancellation.is_cancelled() {
                 ActionItemOutcome::cancelled(target)
             } else {
                 match self
@@ -340,8 +329,6 @@ impl AppServices {
                     ),
                 }
             };
-            self.audit_session_outcome(windows_user, message, &mut outcome)
-                .await;
             outcomes.push((index, outcome));
         }
         outcomes
@@ -351,52 +338,11 @@ impl AppServices {
         &self,
         targets: Vec<(usize, SessionKillTarget)>,
         error: ActionError,
-        message: &str,
-        windows_user: &str,
     ) -> Vec<(usize, ActionItemOutcome<SessionKillTarget>)> {
-        let mut outcomes = Vec::with_capacity(targets.len());
-        for (index, target) in targets {
-            let mut outcome = ActionItemOutcome::failed(target, error.clone());
-            self.audit_session_outcome(windows_user, message, &mut outcome)
-                .await;
-            outcomes.push((index, outcome));
-        }
-        outcomes
-    }
-
-    async fn audit_session_outcome(
-        &self,
-        windows_user: &str,
-        message: &str,
-        outcome: &mut ActionItemOutcome<SessionKillTarget>,
-    ) {
-        let context = AuditContext {
-            cluster_alias: Some(outcome.target.cluster.to_string()),
-            cluster_uuid: Some(outcome.target.cluster_uuid.into_uuid()),
-            infobase_name: outcome.target.infobase.clone(),
-            infobase_uuid: outcome.target.infobase_uuid.map(|uuid| uuid.into_uuid()),
-            session_uuid: Some(outcome.target.session_id.into_uuid()),
-            connection_uuid: None,
-            numeric_id: outcome
-                .target
-                .session_number
-                .and_then(|number| u64::try_from(number).ok()),
-            message: Some(message.to_owned()),
-            reason: None,
-        };
-        let result = match outcome.status {
-            ActionStatus::Success => AuditResult::Success,
-            ActionStatus::Failed => AuditResult::Failure,
-            ActionStatus::Cancelled => AuditResult::Cancelled,
-        };
-        let mut event = AuditEvent::new(windows_user, audit_actions::SESSION_KILL, result)
-            .with_context(context);
-        if let Some(error) = &outcome.error {
-            event = event.with_error(error.code.clone(), error.message.clone());
-        }
-        if let Err(error) = self.audit.record(event).await {
-            outcome.audit_error = Some(ActionError::new(error.code, error.message));
-        }
+        targets
+            .into_iter()
+            .map(|(index, target)| (index, ActionItemOutcome::failed(target, error.clone())))
+            .collect()
     }
 }
 

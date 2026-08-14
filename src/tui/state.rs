@@ -7,7 +7,7 @@ use uuid::Uuid;
 use zeroize::Zeroize;
 
 use crate::application::{
-    AppError, ClusterAddRequest, ClusterRemovePlan, CredentialOverrideAddRequest,
+    AppError, ClusterAddRequest, ClusterRemovePlan, ClusterStatus, CredentialOverrideAddRequest,
     CredentialOverrideRemoveRequest, CredentialOverrideSelector, DiagnosticsSnapshot,
     PreparedConnectionKill, PreparedSessionKill, RacOptions,
 };
@@ -15,7 +15,7 @@ use crate::domain::{
     AuthConfig, AuthMode, ClusterAlias, ClusterTarget, ClusterUuid, ConnectionRecord,
     ConnectionUuid, FieldAccess, FieldRegistry, FieldValueRef, InfobaseAuthOverride,
     InfobaseRecord, InfobaseUuid, QueryOutcome, QuerySpec, RacPolicy, RasEndpoint, RecordKind,
-    SecretString, SessionRecord, SessionUuid, TargetError,
+    SecretString, SessionRecord, SessionUuid, TargetError, TargetErrorKind,
 };
 
 use super::{REFRESH_INTERVAL_PRESETS, TuiOptions, validate_refresh_interval};
@@ -43,7 +43,7 @@ impl Screen {
     pub(crate) const fn title(self) -> &'static str {
         match self {
             Self::Clusters => "Кластеры",
-            Self::Credentials => "Credentials",
+            Self::Credentials => "Доступы к БД",
             Self::Infobases => "Информационные базы",
             Self::Sessions => "Сеансы",
             Self::Connections => "Соединения",
@@ -207,6 +207,12 @@ pub(crate) struct CredentialRow {
     pub cluster: ClusterAlias,
     pub cluster_uuid: ClusterUuid,
     pub entry: InfobaseAuthOverride,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ClusterRow {
+    pub target: ClusterTarget,
+    pub status: ClusterStatus,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -460,7 +466,6 @@ pub(crate) struct ActionReport {
     pub succeeded: usize,
     pub failed: usize,
     pub cancelled: usize,
-    pub audit_failed: usize,
     pub errors: Vec<String>,
 }
 
@@ -508,7 +513,7 @@ impl Job {
 
 #[derive(Clone, Debug)]
 pub(crate) enum BackgroundPayload {
-    Clusters(Result<Vec<ClusterTarget>, TaskFailure>),
+    Clusters(Result<Vec<ClusterRow>, TaskFailure>),
     Credentials(Result<Vec<CredentialRow>, TaskFailure>),
     Infobases(Result<QueryOutcome<InfobaseRecord>, TaskFailure>),
     Sessions(Result<QueryOutcome<SessionRecord>, TaskFailure>),
@@ -590,16 +595,14 @@ pub(crate) struct EditModal {
 pub(crate) enum FormAuthMode {
     None,
     Password,
-    Os,
 }
 
 impl FormAuthMode {
     fn next(self, direction: isize) -> Self {
-        let modes = [Self::None, Self::Password, Self::Os];
+        let modes = [Self::None, Self::Password];
         let current = match self {
             Self::None => 0,
             Self::Password => 1,
-            Self::Os => 2,
         };
         modes[(current as isize + direction).rem_euclid(modes.len() as isize) as usize]
     }
@@ -608,7 +611,6 @@ impl FormAuthMode {
         match self {
             Self::None => "none",
             Self::Password => "password",
-            Self::Os => "os",
         }
     }
 }
@@ -621,7 +623,6 @@ pub(crate) struct ClusterForm {
     pub auth_mode: FormAuthMode,
     pub user: String,
     pub password: String,
-    pub os_user: String,
     pub error: Option<String>,
 }
 
@@ -634,7 +635,6 @@ impl ClusterForm {
             auth_mode: FormAuthMode::None,
             user: String::new(),
             password: String::new(),
-            os_user: String::new(),
             error: None,
         }
     }
@@ -646,20 +646,19 @@ impl ClusterForm {
             .trim()
             .parse::<RasEndpoint>()
             .map_err(|error| error.to_string())?;
-        let auth = build_auth(self.auth_mode, &self.user, &self.password, &self.os_user)?;
+        let auth = build_auth(self.auth_mode, &self.user, &self.password)?;
         let mut request = ClusterAddRequest::new(alias, ras, auth);
         request.rac_options = rac_options;
         Ok(request)
     }
 
-    pub(crate) fn fields(&self) -> [(&'static str, String, bool); 6] {
+    pub(crate) fn fields(&self) -> [(&'static str, String, bool); 5] {
         [
             ("alias", self.alias.clone(), false),
             ("ras_address", self.ras.clone(), false),
             ("auth_mode", self.auth_mode.label().to_owned(), false),
             ("user", self.user.clone(), false),
             ("password", "*".repeat(self.password.chars().count()), true),
-            ("os_user", self.os_user.clone(), false),
         ]
     }
 
@@ -669,7 +668,6 @@ impl ClusterForm {
             1 => Some(&mut self.ras),
             3 => Some(&mut self.user),
             4 => Some(&mut self.password),
-            5 => Some(&mut self.os_user),
             _ => None,
         }
     }
@@ -690,7 +688,6 @@ pub(crate) struct CredentialForm {
     pub auth_mode: FormAuthMode,
     pub user: String,
     pub password: String,
-    pub os_user: String,
     pub error: Option<String>,
 }
 
@@ -704,7 +701,6 @@ impl CredentialForm {
             auth_mode: FormAuthMode::None,
             user: String::new(),
             password: String::new(),
-            os_user: String::new(),
             error: None,
         }
     }
@@ -719,13 +715,13 @@ impl CredentialForm {
             .map(str::parse::<InfobaseUuid>)
             .transpose()
             .map_err(|error| error.to_string())?;
-        let auth = build_auth(self.auth_mode, &self.user, &self.password, &self.os_user)?;
+        let auth = build_auth(self.auth_mode, &self.user, &self.password)?;
         let entry = InfobaseAuthOverride::new(Some(infobase.to_owned()), infobase_uuid, auth)
             .map_err(|error| error.to_string())?;
         Ok(CredentialOverrideAddRequest { cluster, entry })
     }
 
-    pub(crate) fn fields(&self) -> [(&'static str, String, bool); 7] {
+    pub(crate) fn fields(&self) -> [(&'static str, String, bool); 6] {
         [
             ("cluster", self.cluster.clone(), false),
             ("infobase", self.infobase.clone(), false),
@@ -733,7 +729,6 @@ impl CredentialForm {
             ("auth_mode", self.auth_mode.label().to_owned(), false),
             ("user", self.user.clone(), false),
             ("password", "*".repeat(self.password.chars().count()), true),
-            ("os_user", self.os_user.clone(), false),
         ]
     }
 
@@ -744,7 +739,6 @@ impl CredentialForm {
             2 => Some(&mut self.infobase_uuid),
             4 => Some(&mut self.user),
             5 => Some(&mut self.password),
-            6 => Some(&mut self.os_user),
             _ => None,
         }
     }
@@ -756,21 +750,11 @@ impl Drop for CredentialForm {
     }
 }
 
-fn build_auth(
-    mode: FormAuthMode,
-    user: &str,
-    password: &str,
-    os_user: &str,
-) -> Result<AuthConfig, String> {
+fn build_auth(mode: FormAuthMode, user: &str, password: &str) -> Result<AuthConfig, String> {
     match mode {
         FormAuthMode::None => Ok(AuthConfig::none()),
         FormAuthMode::Password => AuthConfig::password(user.trim(), SecretString::new(password))
             .map_err(|e| e.to_string()),
-        FormAuthMode::Os => AuthConfig::os(
-            Some(user.trim().to_owned()),
-            non_empty(os_user).map(str::to_owned),
-        )
-        .map_err(|error| error.to_string()),
     }
 }
 
@@ -789,7 +773,7 @@ pub(crate) enum Modal {
 
 pub(crate) struct App {
     pub screen: Screen,
-    pub clusters: TableScreen<Vec<ClusterTarget>>,
+    pub clusters: TableScreen<Vec<ClusterRow>>,
     pub credentials: TableScreen<Vec<CredentialRow>>,
     pub infobases: TableScreen<QueryOutcome<InfobaseRecord>>,
     pub sessions: TableScreen<QueryOutcome<SessionRecord>>,
@@ -978,7 +962,7 @@ impl App {
     fn apply_clusters(
         &mut self,
         meta: RefreshMeta,
-        result: Result<Vec<ClusterTarget>, TaskFailure>,
+        result: Result<Vec<ClusterRow>, TaskFailure>,
     ) -> Vec<Intent> {
         if meta.screen != Screen::Clusters || !self.clusters.resource.finish(meta) {
             return Vec::new();
@@ -1319,7 +1303,6 @@ impl App {
             format!("succeeded: {}", report.succeeded),
             format!("failed: {}", report.failed),
             format!("cancelled: {}", report.cancelled),
-            format!("audit_failed: {}", report.audit_failed),
         ];
         lines.extend(report.errors.iter().cloned());
         for error in &report.errors {
@@ -1329,7 +1312,7 @@ impl App {
             "{title}: успешно {}, ошибок {}, отменено {}",
             report.succeeded, report.failed, report.cancelled
         );
-        self.status_is_error = report.failed + report.cancelled + report.audit_failed > 0;
+        self.status_is_error = report.failed + report.cancelled > 0;
         self.modal = Some(Modal::Details(DetailsModal {
             title: title.to_owned(),
             lines,
@@ -1864,7 +1847,9 @@ impl App {
             Screen::Credentials => {
                 let cluster = selected_credential(&self.credentials)
                     .map(|row| row.cluster.to_string())
-                    .or_else(|| selected_cluster(&self.clusters).map(|row| row.alias.to_string()))
+                    .or_else(|| {
+                        selected_cluster(&self.clusters).map(|row| row.target.alias.to_string())
+                    })
                     .unwrap_or_default();
                 self.modal = Some(Modal::CredentialForm(CredentialForm::new(cluster)));
             }
@@ -1883,7 +1868,7 @@ impl App {
                 };
                 self.begin_operation(
                     "Подготовка плана удаления кластера...",
-                    OperationRequest::PrepareClusterRemove(cluster.alias.to_string()),
+                    OperationRequest::PrepareClusterRemove(cluster.target.alias.to_string()),
                 )
             }
             Screen::Credentials => {
@@ -1996,8 +1981,8 @@ impl App {
 fn handle_cluster_form_input(form: &mut ClusterForm, key: KeyEvent) {
     form.error = None;
     match key.code {
-        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % 6,
-        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + 5) % 6,
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % 5,
+        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + 4) % 5,
         KeyCode::F(2) => form.auth_mode = form.auth_mode.next(1),
         KeyCode::Left if form.field == 2 => form.auth_mode = form.auth_mode.next(-1),
         KeyCode::Right | KeyCode::Char(' ') if form.field == 2 => {
@@ -2020,8 +2005,8 @@ fn handle_cluster_form_input(form: &mut ClusterForm, key: KeyEvent) {
 fn handle_credential_form_input(form: &mut CredentialForm, key: KeyEvent) {
     form.error = None;
     match key.code {
-        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % 7,
-        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + 6) % 7,
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % 6,
+        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + 5) % 6,
         KeyCode::F(2) => form.auth_mode = form.auth_mode.next(1),
         KeyCode::Left if form.field == 3 => form.auth_mode = form.auth_mode.next(-1),
         KeyCode::Right | KeyCode::Char(' ') if form.field == 3 => {
@@ -2055,8 +2040,8 @@ fn outcome_len<T>(state: &LoadState<QueryOutcome<T>>) -> usize {
     }
 }
 
-pub(crate) fn cluster_key(record: &ClusterTarget) -> RowKey {
-    RowKey::Cluster(record.discovered_cluster.uuid.into_uuid())
+pub(crate) fn cluster_key(record: &ClusterRow) -> RowKey {
+    RowKey::Cluster(record.target.discovered_cluster.uuid.into_uuid())
 }
 
 pub(crate) fn credential_key(record: &CredentialRow) -> RowKey {
@@ -2088,7 +2073,7 @@ pub(crate) fn connection_key(record: &ConnectionRecord) -> RowKey {
     )
 }
 
-fn cluster_keys_from_state(state: &LoadState<Vec<ClusterTarget>>) -> Vec<RowKey> {
+fn cluster_keys_from_state(state: &LoadState<Vec<ClusterRow>>) -> Vec<RowKey> {
     match state {
         LoadState::Data(data) => data.iter().map(cluster_key).collect(),
         LoadState::Loading | LoadState::Error(_) => Vec::new(),
@@ -2123,7 +2108,7 @@ fn connection_keys_from_state(state: &LoadState<QueryOutcome<ConnectionRecord>>)
     }
 }
 
-fn selected_cluster(screen: &TableScreen<Vec<ClusterTarget>>) -> Option<&ClusterTarget> {
+fn selected_cluster(screen: &TableScreen<Vec<ClusterRow>>) -> Option<&ClusterRow> {
     match &screen.resource.state {
         LoadState::Data(data) => screen.selected_index().and_then(|index| data.get(index)),
         LoadState::Loading | LoadState::Error(_) => None,
@@ -2224,7 +2209,8 @@ fn selected_connection_identities(
         .collect()
 }
 
-fn cluster_details(record: &ClusterTarget) -> Vec<String> {
+fn cluster_details(row: &ClusterRow) -> Vec<String> {
+    let record = &row.target;
     let mut lines = vec![
         format!("alias: {}", record.alias),
         format!("ras_address: {}", record.ras),
@@ -2232,6 +2218,7 @@ fn cluster_details(record: &ClusterTarget) -> Vec<String> {
         format!("cluster_name: {}", record.discovered_cluster.name),
         format!("cluster_host: {}", record.discovered_cluster.host),
         format!("cluster_port: {}", record.discovered_cluster.port),
+        format!("status: {}", cluster_status_text(&row.status)),
         format!("rac_policy: {}", rac_policy(&record.rac_policy)),
         format!(
             "cluster_auth_mode: {}",
@@ -2240,10 +2227,6 @@ fn cluster_details(record: &ClusterTarget) -> Vec<String> {
         format!(
             "cluster_auth_user: {}",
             record.cluster_auth.user().unwrap_or("")
-        ),
-        format!(
-            "cluster_auth_os_user: {}",
-            record.cluster_auth.expected_os_user().unwrap_or("")
         ),
         format!(
             "infobase_default_auth_mode: {}",
@@ -2278,10 +2261,6 @@ fn credential_details(record: &CredentialRow) -> Vec<String> {
         ),
         format!("auth_mode: {}", auth_mode(record.entry.auth().mode())),
         format!("user: {}", record.entry.auth().user().unwrap_or("")),
-        format!(
-            "os_user: {}",
-            record.entry.auth().expected_os_user().unwrap_or("")
-        ),
     ]
 }
 
@@ -2322,7 +2301,6 @@ fn auth_mode(mode: AuthMode) -> &'static str {
     match mode {
         AuthMode::None => "none",
         AuthMode::Password => "password",
-        AuthMode::Os => "os",
     }
 }
 
@@ -2331,6 +2309,26 @@ fn rac_policy(policy: &RacPolicy) -> String {
         RacPolicy::Auto => "auto".to_owned(),
         RacPolicy::Version(version) => format!("version:{version}"),
         RacPolicy::ExplicitPath(path) => format!("path:{}", path.display()),
+    }
+}
+
+pub(crate) fn cluster_status_text(status: &ClusterStatus) -> String {
+    match status {
+        ClusterStatus::Ok => "ok".to_owned(),
+        ClusterStatus::Error(error) => format!("error ({})", short_error(error)),
+    }
+}
+
+fn short_error(error: &TargetError) -> &'static str {
+    match error.kind {
+        TargetErrorKind::Unavailable => "недоступен",
+        TargetErrorKind::Timeout => "тайм-аут",
+        TargetErrorKind::Authentication => "ошибка доступа",
+        TargetErrorKind::Protocol => "ошибка протокола",
+        TargetErrorKind::InvalidResponse => "некорректный ответ",
+        TargetErrorKind::RacNotFound => "rac.exe не найден",
+        TargetErrorKind::Cancelled => "отменено",
+        TargetErrorKind::Internal => "внутренняя ошибка",
     }
 }
 
@@ -2367,7 +2365,7 @@ fn help_lines() -> Vec<String> {
         "Space: отметить несколько сеансов/соединений",
         "k: подготовить точные планы и запросить подтверждение kill",
         "n: добавить кластер/credential override; Delete/x: удалить",
-        "F2 или ← → на auth_mode: none/password/os",
+        "F2 или ← → на auth_mode: none/password",
         "Esc: закрыть окно/отменить задачу; на основном экране выйти",
         "q или Ctrl+C: выйти",
     ]

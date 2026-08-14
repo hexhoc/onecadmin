@@ -35,9 +35,9 @@ The path priority is `--config`, `ONECADMIN_CONFIG`, then the default path. The 
 
 ## Password Warning
 
-Passwords are stored in plain text in `config.yaml`. The application attempts to restrict the file ACL to the current Windows user, but this is not encryption.
+Passwords are stored in plain text in `config.yaml`. This is not encryption.
 
-Passwords passed to `onecadmin` and forwarded to `rac.exe` can be visible in PowerShell history and in the process list. Technical logs, JSON errors and audit records redact configured passwords, but operators must still protect the Windows account and configuration file.
+Passwords passed to `onecadmin` and forwarded to `rac.exe` can be visible in PowerShell history and in the process list. Technical logs and JSON errors redact configured passwords, but operators must still protect the Windows account and configuration file.
 
 ## Usage
 
@@ -73,10 +73,9 @@ onecadmin connection kill --host 'APP-%' --force
 
 ```text
 %LOCALAPPDATA%\onecadmin\logs\onecadmin.log
-%LOCALAPPDATA%\onecadmin\logs\audit.jsonl
 ```
 
-The technical log rotates at 10 MiB and keeps five files. Administrative mutations are written to the JSON Lines audit file.
+The technical log rotates at 10 MiB and keeps five files.
 
 ## Verification
 

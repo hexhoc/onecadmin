@@ -21,23 +21,24 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::{
-    AuthConfig, ClusterSource, DiscoveredCluster, FieldRegistry, QuerySpec, RecordKind, SqlMask,
-    TargetError, TargetErrorKind,
+    ClusterSource, DiscoveredCluster, FieldRegistry, QuerySpec, RecordKind, SqlMask, TargetError,
+    TargetErrorKind,
 };
 use crate::infrastructure::config::ConfigStore;
 use crate::infrastructure::rac::RacGateway;
-use crate::infrastructure::telemetry::AuditSink;
-use crate::infrastructure::windows::WindowsIdentityProvider;
 
-pub use clusters::{ClusterAddOutcome, ClusterAddRequest, ClusterRemoveOutcome, ClusterRemovePlan};
+pub use clusters::{
+    ClusterAddOutcome, ClusterAddRequest, ClusterRemoveOutcome, ClusterRemovePlan, ClusterStatus,
+    ClusterStatusEntry,
+};
 pub use connections::{ConnectionKillRequest, ConnectionListRequest};
 pub use conversion::{
     ApplicationConfigSnapshot, ConfiguredTarget, RacOptions, auth_to_rac_credentials,
     convert_config_snapshot,
 };
 pub use credentials::{
-    CredentialMutation, CredentialOverrideAddRequest, CredentialOverrideRemoveRequest,
-    CredentialOverrideSelector, CredentialWriteOutcome,
+    CredentialOverrideAddRequest, CredentialOverrideRemoveRequest, CredentialOverrideSelector,
+    CredentialWriteOutcome,
 };
 pub use diagnostics::{DiagnosticsSnapshot, SelectedRac};
 pub use error::{AppError, AppErrorCategory, AppExitCode, ExitCodePolicy};
@@ -51,8 +52,7 @@ pub use outcome::{
     ConnectionKillOutcome, PreparedConnectionKill, PreparedSessionKill, SessionKillOutcome,
 };
 pub use ports::{
-    AuditPort, AuditSinkAdapter, ConfigRepository, ConfigStoreAdapter, IdentityPort, PortError,
-    PortErrorKind, RacPort, RawConfigSnapshot, WindowsIdentityAdapter,
+    ConfigRepository, ConfigStoreAdapter, PortError, PortErrorKind, RacPort, RawConfigSnapshot,
 };
 pub use sessions::{SessionKillRequest, SessionListRequest};
 
@@ -106,78 +106,33 @@ impl Default for ClusterSelector {
 pub struct AppServices {
     pub(crate) config: Arc<dyn ConfigRepository>,
     pub(crate) rac: Arc<dyn RacPort>,
-    pub(crate) audit: Arc<dyn AuditPort>,
-    pub(crate) identity: Arc<dyn IdentityPort>,
     pub(crate) fields: FieldRegistry,
     pub(crate) diagnostics: Arc<RwLock<DiagnosticsSnapshot>>,
 }
 
 impl AppServices {
     #[must_use]
-    pub fn new<C, R, A, I>(config: C, rac: R, audit: A, identity: I) -> Self
+    pub fn new<C, R>(config: C, rac: R) -> Self
     where
         C: ConfigRepository + 'static,
         R: RacPort + 'static,
-        A: AuditPort + 'static,
-        I: IdentityPort + 'static,
     {
-        Self::from_ports(
-            Arc::new(config),
-            Arc::new(rac),
-            Arc::new(audit),
-            Arc::new(identity),
-        )
+        Self::from_ports(Arc::new(config), Arc::new(rac))
     }
 
     #[must_use]
-    pub fn from_ports(
-        config: Arc<dyn ConfigRepository>,
-        rac: Arc<dyn RacPort>,
-        audit: Arc<dyn AuditPort>,
-        identity: Arc<dyn IdentityPort>,
-    ) -> Self {
+    pub fn from_ports(config: Arc<dyn ConfigRepository>, rac: Arc<dyn RacPort>) -> Self {
         Self {
             config,
             rac,
-            audit,
-            identity,
             fields: FieldRegistry::new(),
             diagnostics: Arc::new(RwLock::new(DiagnosticsSnapshot::default())),
         }
     }
 
     #[must_use]
-    pub fn from_infrastructure<A, I>(
-        config: ConfigStore,
-        rac: RacGateway,
-        audit: A,
-        identity: I,
-    ) -> Self
-    where
-        A: AuditSink + 'static,
-        I: WindowsIdentityProvider + 'static,
-    {
-        Self::new(
-            ConfigStoreAdapter::new(config),
-            rac,
-            AuditSinkAdapter::new(audit),
-            WindowsIdentityAdapter::new(identity),
-        )
-    }
-
-    #[must_use]
-    pub fn from_shared_infrastructure(
-        config: Arc<ConfigStore>,
-        rac: Arc<RacGateway>,
-        audit: Arc<dyn AuditSink>,
-        identity: Arc<dyn WindowsIdentityProvider>,
-    ) -> Self {
-        Self::from_ports(
-            Arc::new(ConfigStoreAdapter::from_shared(config)),
-            rac,
-            Arc::new(AuditSinkAdapter::from_shared(audit)),
-            Arc::new(WindowsIdentityAdapter::from_shared(identity)),
-        )
+    pub fn from_infrastructure(config: ConfigStore, rac: RacGateway) -> Self {
+        Self::new(ConfigStoreAdapter::new(config), rac)
     }
 
     #[must_use]
@@ -284,9 +239,6 @@ impl AppServices {
                 ),
             ));
         }
-        self.verify_auth_identity(&configured.target.cluster_auth)
-            .await
-            .map_err(|error| target_error_from_port(configured, error))?;
         let source = ClusterSource::new(
             configured.target.alias.clone(),
             cluster.uuid,
@@ -297,29 +249,6 @@ impl AppServices {
             cluster,
             source,
             search_policy: policy,
-        })
-    }
-
-    pub(crate) async fn verify_auth_identity(&self, auth: &AuthConfig) -> Result<(), PortError> {
-        if let Some(expected) = auth.expected_os_user() {
-            self.identity
-                .verify_expected(expected.to_owned())
-                .await
-                .map(|_| ())
-        } else {
-            Ok(())
-        }
-    }
-
-    pub(crate) async fn audit_user(&self) -> Result<String, AppError> {
-        self.identity.current_identity().await.map_err(|error| {
-            AppError::internal(
-                error.code,
-                format!(
-                    "Не удалось определить текущего пользователя Windows для аудита: {}",
-                    error.message
-                ),
-            )
         })
     }
 }
@@ -415,20 +344,6 @@ pub(crate) fn config_port_error(error: PortError) -> AppError {
         }
         _ => AppError::internal(error.code, error.message),
     }
-}
-
-pub(crate) fn target_error_from_port(target: &ConfiguredTarget, error: PortError) -> TargetError {
-    let kind = match error.kind {
-        PortErrorKind::IdentityMismatch => TargetErrorKind::Authentication,
-        PortErrorKind::IdentityUnavailable => TargetErrorKind::Internal,
-        _ => TargetErrorKind::Internal,
-    };
-    TargetError::new(
-        target.target.alias.clone(),
-        target.target.ras.clone(),
-        kind,
-        error.message,
-    )
 }
 
 pub(crate) fn finish_target_results<T>(

@@ -9,10 +9,9 @@ use crate::domain::{
     SqlMask, TargetError, TargetErrorKind,
 };
 use crate::infrastructure::rac::RacErrorKind;
-use crate::infrastructure::telemetry::{AuditContext, AuditEvent, AuditResult, audit_actions};
 
 use super::{
-    ActionError, ActionItemOutcome, ActionOutcome, ActionStatus, AppError, AppServices, Approval,
+    ActionError, ActionItemOutcome, ActionOutcome, AppError, AppServices, Approval,
     ClusterSelector, ConfiguredTarget, ConnectionKillOutcome, PreparedConnectionKill, RacOptions,
     auth_to_rac_credentials, finish_target_results, normalize_connection, resolved_query_spec,
     select_configured_targets,
@@ -250,7 +249,6 @@ impl AppServices {
         options: &RacOptions,
         cancellation: &CancellationToken,
     ) -> Result<ConnectionKillOutcome, AppError> {
-        let windows_user = self.audit_user().await?;
         let snapshot = self.load_config_snapshot(cancellation).await?;
         let mut groups = BTreeMap::new();
         for (index, target) in plan.targets().iter().cloned().enumerate() {
@@ -260,13 +258,7 @@ impl AppServices {
                 .push((index, target));
         }
         let grouped = join_all(groups.into_values().map(|targets| {
-            self.execute_connection_group(
-                &snapshot.targets,
-                targets,
-                options,
-                &windows_user,
-                cancellation,
-            )
+            self.execute_connection_group(&snapshot.targets, targets, options, cancellation)
         }))
         .await;
         let mut indexed = grouped.into_iter().flatten().collect::<Vec<_>>();
@@ -281,7 +273,6 @@ impl AppServices {
         configured: &[ConfiguredTarget],
         targets: Vec<(usize, ConnectionKillTarget)>,
         options: &RacOptions,
-        windows_user: &str,
         cancellation: &CancellationToken,
     ) -> Vec<(usize, ActionItemOutcome<ConnectionKillTarget>)> {
         let Some(first) = targets.first().map(|(_, target)| target) else {
@@ -299,7 +290,6 @@ impl AppServices {
                         "cluster_snapshot_mismatch",
                         "Кластер отсутствует или изменился после создания снимка",
                     ),
-                    windows_user,
                 )
                 .await;
         };
@@ -307,18 +297,14 @@ impl AppServices {
             Ok(live) => live,
             Err(error) => {
                 return self
-                    .fail_connection_group(
-                        targets,
-                        ActionError::new(error.code(), error.message),
-                        windows_user,
-                    )
+                    .fail_connection_group(targets, ActionError::new(error.code(), error.message))
                     .await;
             }
         };
 
         let mut outcomes = Vec::with_capacity(targets.len());
         for (index, target) in targets {
-            let mut outcome = if cancellation.is_cancelled() {
+            let outcome = if cancellation.is_cancelled() {
                 ActionItemOutcome::cancelled(target)
             } else {
                 let auth = configured
@@ -334,39 +320,31 @@ impl AppServices {
                         target,
                         ActionError::new(error.code(), error.message()),
                     ),
-                    Ok(infobase_credentials) => match self.verify_auth_identity(&auth).await {
+                    Ok(infobase_credentials) => match self
+                        .rac
+                        .connection_disconnect(
+                            configured.target.ras.as_str(),
+                            live.cluster.uuid.into_uuid(),
+                            target.process_id.into_uuid(),
+                            target.connection_id.into_uuid(),
+                            &configured.cluster_credentials,
+                            &infobase_credentials,
+                            &live.search_policy,
+                            cancellation,
+                        )
+                        .await
+                    {
+                        Ok(_) => ActionItemOutcome::success(target),
+                        Err(error) if error.kind() == RacErrorKind::Cancelled => {
+                            ActionItemOutcome::cancelled(target)
+                        }
                         Err(error) => ActionItemOutcome::failed(
                             target,
-                            ActionError::new(error.code, error.message),
+                            ActionError::new(error.code(), error.to_string()),
                         ),
-                        Ok(()) => match self
-                            .rac
-                            .connection_disconnect(
-                                configured.target.ras.as_str(),
-                                live.cluster.uuid.into_uuid(),
-                                target.process_id.into_uuid(),
-                                target.connection_id.into_uuid(),
-                                &configured.cluster_credentials,
-                                &infobase_credentials,
-                                &live.search_policy,
-                                cancellation,
-                            )
-                            .await
-                        {
-                            Ok(_) => ActionItemOutcome::success(target),
-                            Err(error) if error.kind() == RacErrorKind::Cancelled => {
-                                ActionItemOutcome::cancelled(target)
-                            }
-                            Err(error) => ActionItemOutcome::failed(
-                                target,
-                                ActionError::new(error.code(), error.to_string()),
-                            ),
-                        },
                     },
                 }
             };
-            self.audit_connection_outcome(windows_user, &mut outcome)
-                .await;
             outcomes.push((index, outcome));
         }
         outcomes
@@ -376,50 +354,11 @@ impl AppServices {
         &self,
         targets: Vec<(usize, ConnectionKillTarget)>,
         error: ActionError,
-        windows_user: &str,
     ) -> Vec<(usize, ActionItemOutcome<ConnectionKillTarget>)> {
-        let mut outcomes = Vec::with_capacity(targets.len());
-        for (index, target) in targets {
-            let mut outcome = ActionItemOutcome::failed(target, error.clone());
-            self.audit_connection_outcome(windows_user, &mut outcome)
-                .await;
-            outcomes.push((index, outcome));
-        }
-        outcomes
-    }
-
-    async fn audit_connection_outcome(
-        &self,
-        windows_user: &str,
-        outcome: &mut ActionItemOutcome<ConnectionKillTarget>,
-    ) {
-        let context = AuditContext {
-            cluster_alias: Some(outcome.target.cluster.to_string()),
-            cluster_uuid: Some(outcome.target.cluster_uuid.into_uuid()),
-            infobase_name: outcome.target.infobase.clone(),
-            infobase_uuid: Some(outcome.target.infobase_uuid.into_uuid()),
-            session_uuid: None,
-            connection_uuid: Some(outcome.target.connection_id.into_uuid()),
-            numeric_id: outcome
-                .target
-                .connection_number
-                .and_then(|number| u64::try_from(number).ok()),
-            message: None,
-            reason: None,
-        };
-        let result = match outcome.status {
-            ActionStatus::Success => AuditResult::Success,
-            ActionStatus::Failed => AuditResult::Failure,
-            ActionStatus::Cancelled => AuditResult::Cancelled,
-        };
-        let mut event = AuditEvent::new(windows_user, audit_actions::CONNECTION_KILL, result)
-            .with_context(context);
-        if let Some(error) = &outcome.error {
-            event = event.with_error(error.code.clone(), error.message.clone());
-        }
-        if let Err(error) = self.audit.record(event).await {
-            outcome.audit_error = Some(ActionError::new(error.code, error.message));
-        }
+        targets
+            .into_iter()
+            .map(|(index, target)| (index, ActionItemOutcome::failed(target, error.clone())))
+            .collect()
     }
 }
 

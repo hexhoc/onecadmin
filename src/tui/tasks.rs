@@ -8,8 +8,9 @@ use crate::application::{
 use crate::domain::AuthMode;
 
 use super::state::{
-    ActionReport, BackgroundMessage, BackgroundPayload, ConnectionSelection, CredentialRow, Job,
-    JobKind, OperationRequest, OperationResult, RefreshWork, SessionSelection, TaskFailure,
+    ActionReport, BackgroundMessage, BackgroundPayload, ClusterRow, ConnectionSelection,
+    CredentialRow, Job, JobKind, OperationRequest, OperationResult, RefreshWork, SessionSelection,
+    TaskFailure,
 };
 
 pub(crate) fn spawn_job(
@@ -44,14 +45,20 @@ async fn run_refresh(
 ) -> BackgroundPayload {
     match work {
         RefreshWork::Clusters { query } => BackgroundPayload::Clusters(
-            services
-                .configured_clusters(cancellation)
-                .await
-                .map(|mut records| {
-                    filter_clusters(&mut records, &query);
-                    records
-                })
-                .map_err(TaskFailure::from),
+            match services.cluster_statuses(rac_options, cancellation).await {
+                Ok(entries) => {
+                    let mut rows = entries
+                        .into_iter()
+                        .map(|entry| ClusterRow {
+                            target: entry.target,
+                            status: entry.status,
+                        })
+                        .collect::<Vec<_>>();
+                    filter_clusters(&mut rows, &query);
+                    Ok(rows)
+                }
+                Err(error) => Err(TaskFailure::from(error)),
+            },
         ),
         RefreshWork::Credentials { query } => {
             BackgroundPayload::Credentials(load_credentials(services, &query, cancellation).await)
@@ -143,17 +150,17 @@ async fn load_credentials(
     Ok(rows)
 }
 
-fn filter_clusters(records: &mut Vec<crate::domain::ClusterTarget>, query: &str) {
+fn filter_clusters(records: &mut Vec<ClusterRow>, query: &str) {
     let query = query.trim().to_lowercase();
     if query.is_empty() {
         return;
     }
     records.retain(|record| {
         [
-            record.alias.as_str(),
-            record.ras.as_str(),
-            &record.discovered_cluster.name,
-            &record.discovered_cluster.host,
+            record.target.alias.as_str(),
+            record.target.ras.as_str(),
+            &record.target.discovered_cluster.name,
+            &record.target.discovered_cluster.host,
         ]
         .iter()
         .any(|value| value.to_lowercase().contains(&query))
@@ -171,7 +178,6 @@ fn filter_credentials(records: &mut Vec<CredentialRow>, query: &str) {
             record.cluster.as_str(),
             record.entry.infobase().unwrap_or_default(),
             record.entry.auth().user().unwrap_or_default(),
-            record.entry.auth().expected_os_user().unwrap_or_default(),
             mode,
         ]
         .iter()
@@ -187,7 +193,6 @@ const fn auth_mode(mode: AuthMode) -> &'static str {
     match mode {
         AuthMode::None => "none",
         AuthMode::Password => "password",
-        AuthMode::Os => "os",
     }
 }
 
@@ -378,17 +383,10 @@ async fn execute_sessions(
         report.succeeded += outcome.meta.succeeded;
         report.failed += outcome.meta.failed;
         report.cancelled += outcome.meta.cancelled;
-        report.audit_failed += outcome.meta.audit_failed;
         for result in outcome.items {
             if let Some(error) = result.error {
                 report.errors.push(format!(
                     "{} session={} {}: {}",
-                    result.target.cluster, result.target.session_id, error.code, error.message
-                ));
-            }
-            if let Some(error) = result.audit_error {
-                report.errors.push(format!(
-                    "{} session={} audit {}: {}",
                     result.target.cluster, result.target.session_id, error.code, error.message
                 ));
             }
@@ -421,17 +419,10 @@ async fn execute_connections(
         report.succeeded += outcome.meta.succeeded;
         report.failed += outcome.meta.failed;
         report.cancelled += outcome.meta.cancelled;
-        report.audit_failed += outcome.meta.audit_failed;
         for result in outcome.items {
             if let Some(error) = result.error {
                 report.errors.push(format!(
                     "{} connection={} {}: {}",
-                    result.target.cluster, result.target.connection_id, error.code, error.message
-                ));
-            }
-            if let Some(error) = result.audit_error {
-                report.errors.push(format!(
-                    "{} connection={} audit {}: {}",
                     result.target.cluster, result.target.connection_id, error.code, error.message
                 ));
             }

@@ -11,17 +11,12 @@ use crate::infrastructure::config::{
 use crate::infrastructure::rac::{
     RacCandidate, RacCredentials, RacError, RacGateway, RacRecord, SearchPolicy,
 };
-use crate::infrastructure::telemetry::{AuditEvent, AuditSink};
-use crate::infrastructure::windows::WindowsIdentityProvider;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PortErrorKind {
     Configuration,
     Conflict,
     NotFound,
-    IdentityMismatch,
-    IdentityUnavailable,
-    Audit,
     Internal,
 }
 
@@ -32,9 +27,6 @@ impl PortErrorKind {
             Self::Configuration => "configuration_error",
             Self::Conflict => "conflict",
             Self::NotFound => "not_found",
-            Self::IdentityMismatch => "identity_mismatch",
-            Self::IdentityUnavailable => "identity_unavailable",
-            Self::Audit => "audit_write_failed",
             Self::Internal => "internal_port_error",
         }
     }
@@ -455,126 +447,4 @@ impl RacPort for RacGateway {
     async fn chosen_candidate(&self, ras_address: &str) -> Option<RacCandidate> {
         RacGateway::chosen_candidate(self, ras_address).await
     }
-}
-
-#[async_trait]
-pub trait AuditPort: Send + Sync {
-    async fn record(&self, event: AuditEvent) -> Result<(), PortError>;
-}
-
-#[derive(Clone)]
-pub struct AuditSinkAdapter {
-    sink: Arc<dyn AuditSink>,
-}
-
-impl AuditSinkAdapter {
-    #[must_use]
-    pub fn new<T>(sink: T) -> Self
-    where
-        T: AuditSink + 'static,
-    {
-        Self {
-            sink: Arc::new(sink),
-        }
-    }
-
-    #[must_use]
-    pub fn from_shared(sink: Arc<dyn AuditSink>) -> Self {
-        Self { sink }
-    }
-}
-
-impl fmt::Debug for AuditSinkAdapter {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("AuditSinkAdapter")
-            .finish_non_exhaustive()
-    }
-}
-
-#[async_trait]
-impl AuditPort for AuditSinkAdapter {
-    async fn record(&self, event: AuditEvent) -> Result<(), PortError> {
-        let sink = Arc::clone(&self.sink);
-        tokio::task::spawn_blocking(move || sink.record(&event))
-            .await
-            .map_err(join_error)?
-            .map_err(|error| {
-                PortError::new(
-                    PortErrorKind::Audit,
-                    "audit_write_failed",
-                    error.to_string(),
-                )
-            })
-    }
-}
-
-#[async_trait]
-pub trait IdentityPort: Send + Sync {
-    async fn current_identity(&self) -> Result<String, PortError>;
-    async fn verify_expected(&self, expected: String) -> Result<String, PortError>;
-}
-
-#[derive(Clone)]
-pub struct WindowsIdentityAdapter {
-    provider: Arc<dyn WindowsIdentityProvider>,
-}
-
-impl WindowsIdentityAdapter {
-    #[must_use]
-    pub fn new<T>(provider: T) -> Self
-    where
-        T: WindowsIdentityProvider + 'static,
-    {
-        Self {
-            provider: Arc::new(provider),
-        }
-    }
-
-    #[must_use]
-    pub fn from_shared(provider: Arc<dyn WindowsIdentityProvider>) -> Self {
-        Self { provider }
-    }
-}
-
-impl fmt::Debug for WindowsIdentityAdapter {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("WindowsIdentityAdapter")
-            .finish_non_exhaustive()
-    }
-}
-
-#[async_trait]
-impl IdentityPort for WindowsIdentityAdapter {
-    async fn current_identity(&self) -> Result<String, PortError> {
-        let provider = Arc::clone(&self.provider);
-        tokio::task::spawn_blocking(move || provider.current_identity())
-            .await
-            .map_err(join_error)?
-            .map(|identity| identity.to_string_lossy())
-            .map_err(identity_error)
-    }
-
-    async fn verify_expected(&self, expected: String) -> Result<String, PortError> {
-        let provider = Arc::clone(&self.provider);
-        tokio::task::spawn_blocking(move || provider.verify_expected(&expected))
-            .await
-            .map_err(join_error)?
-            .map(|identity| identity.to_string_lossy())
-            .map_err(identity_error)
-    }
-}
-
-fn identity_error(error: crate::infrastructure::windows::IdentityError) -> PortError {
-    let kind = match error {
-        crate::infrastructure::windows::IdentityError::IdentityMismatch { .. }
-        | crate::infrastructure::windows::IdentityError::EmptyExpectedIdentity => {
-            PortErrorKind::IdentityMismatch
-        }
-        crate::infrastructure::windows::IdentityError::IdentityUnavailable { .. } => {
-            PortErrorKind::IdentityUnavailable
-        }
-    };
-    PortError::new(kind, kind.code(), error.to_string())
 }

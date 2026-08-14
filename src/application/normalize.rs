@@ -255,7 +255,8 @@ pub fn normalize_connection(
     .map(InfobaseUuid::new);
     normalized.conn_id = optional_int(&mut reader, "conn_id", &["conn_id", "connection_id"]);
     normalized.host = optional_string(&mut reader, &["host"]);
-    normalized.application = optional_string(&mut reader, &["application", "app_id"]);
+    normalized.application = optional_string(&mut reader, &["application", "app_id"])
+        .map(|value| strip_surrounding_quotes(&value));
     normalized.connected_at = optional_datetime(&mut reader, "connected_at", &["connected_at"]);
     normalized.session_number = optional_int(
         &mut reader,
@@ -378,6 +379,18 @@ fn optional_uuid(
 
 fn optional_string(reader: &mut RecordReader<'_>, aliases: &[&str]) -> Option<String> {
     reader.take(aliases).filter(|value| !value.is_empty())
+}
+
+fn strip_surrounding_quotes(value: &str) -> String {
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2 {
+        for quote in *b"\"'" {
+            if bytes.first() == Some(&quote) && bytes.last() == Some(&quote) {
+                return value[1..value.len() - 1].to_owned();
+            }
+        }
+    }
+    value.to_owned()
 }
 
 fn optional_int(

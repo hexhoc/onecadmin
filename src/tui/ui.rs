@@ -14,9 +14,9 @@ use crate::domain::{
 };
 
 use super::state::{
-    App, ClusterForm, CredentialForm, CredentialRow, DetailsModal, FormAuthMode, LoadState, Modal,
-    QuerySettings, RowKey, Screen, TableNav, TableScreen, TaskFailure, cluster_key, connection_key,
-    credential_key, infobase_key, session_key,
+    App, ClusterForm, ClusterRow, CredentialForm, CredentialRow, DetailsModal, FormAuthMode,
+    LoadState, Modal, QuerySettings, RowKey, Screen, TableNav, TableScreen, TaskFailure,
+    cluster_key, cluster_status_text, connection_key, credential_key, infobase_key, session_key,
 };
 
 const ACCENT: Color = Color::Rgb(90, 180, 210);
@@ -144,11 +144,7 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &App) {
     );
 }
 
-fn render_clusters(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    screen: &mut TableScreen<Vec<crate::domain::ClusterTarget>>,
-) {
+fn render_clusters(frame: &mut Frame<'_>, area: Rect, screen: &mut TableScreen<Vec<ClusterRow>>) {
     match &screen.resource.state {
         LoadState::Loading => render_loading(frame, area, "Кластеры"),
         LoadState::Error(error) => render_error(frame, area, "Кластеры", error),
@@ -166,6 +162,7 @@ fn render_clusters(
                     "host",
                     "port",
                     "auth",
+                    "status",
                 ],
                 records,
                 &mut screen.nav,
@@ -173,13 +170,14 @@ fn render_clusters(
                 false,
                 |record| {
                     vec![
-                        record.alias.to_string(),
-                        record.ras.to_string(),
-                        record.discovered_cluster.name.clone(),
-                        record.discovered_cluster.uuid.to_string(),
-                        record.discovered_cluster.host.clone(),
-                        record.discovered_cluster.port.to_string(),
-                        auth_mode(record.cluster_auth.mode()).to_owned(),
+                        record.target.alias.to_string(),
+                        record.target.ras.to_string(),
+                        record.target.discovered_cluster.name.clone(),
+                        record.target.discovered_cluster.uuid.to_string(),
+                        record.target.discovered_cluster.host.clone(),
+                        record.target.discovered_cluster.port.to_string(),
+                        auth_mode(record.target.cluster_auth.mode()).to_owned(),
+                        cluster_status_text(&record.status),
                     ]
                 },
             );
@@ -201,14 +199,7 @@ fn render_credentials(
                 frame,
                 area,
                 table_title("Credentials", active, records.len()),
-                &[
-                    "cluster",
-                    "infobase",
-                    "infobase_uuid",
-                    "auth_mode",
-                    "user",
-                    "os_user",
-                ],
+                &["cluster", "infobase", "infobase_uuid", "auth_mode", "user"],
                 records,
                 &mut screen.nav,
                 credential_key,
@@ -223,12 +214,6 @@ fn render_credentials(
                             .map_or_else(String::new, |uuid| uuid.to_string()),
                         auth_mode(record.entry.auth().mode()).to_owned(),
                         record.entry.auth().user().unwrap_or_default().to_owned(),
-                        record
-                            .entry
-                            .auth()
-                            .expected_os_user()
-                            .unwrap_or_default()
-                            .to_owned(),
                     ]
                 },
             );
@@ -884,6 +869,5 @@ const fn auth_mode(mode: AuthMode) -> &'static str {
     match mode {
         AuthMode::None => "none",
         AuthMode::Password => "password",
-        AuthMode::Os => "os",
     }
 }

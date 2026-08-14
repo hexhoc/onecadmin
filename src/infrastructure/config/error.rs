@@ -100,20 +100,6 @@ impl std::fmt::Display for SafeYamlError {
 }
 
 #[derive(Debug, Error)]
-#[error("{message}")]
-pub struct AclError {
-    message: String,
-}
-
-impl AclError {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-}
-
-#[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("configuration path is empty")]
     EmptyConfigPath,
@@ -166,13 +152,6 @@ pub enum ConfigError {
 
     #[error("serialized configuration did not pass its own schema validation")]
     SerializationInvariant,
-
-    #[error("cannot protect temporary configuration {path:?} for the current user: {source}")]
-    Acl {
-        path: PathBuf,
-        #[source]
-        source: AclError,
-    },
 
     #[error("cannot atomically replace configuration {path:?}: {source}")]
     AtomicReplace {

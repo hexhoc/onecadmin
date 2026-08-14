@@ -681,7 +681,8 @@ mod tests {
         let by_name = InfobaseAuthOverride::new(
             Some("Accounting".to_owned()),
             None,
-            AuthConfig::os(None, None).unwrap_or_else(|error| panic!("{error}")),
+            AuthConfig::password("name-user", SecretString::new("name-secret"))
+                .unwrap_or_else(|error| panic!("{error}")),
         )
         .unwrap_or_else(|error| panic!("{error}"));
         let by_uuid = InfobaseAuthOverride::new(
@@ -698,7 +699,10 @@ mod tests {
             policy.resolve(Some(id), "Accounting").mode(),
             AuthMode::Password
         );
-        assert_eq!(policy.resolve(None, "ACCOUNTING").mode(), AuthMode::Os);
+        assert_eq!(
+            policy.resolve(None, "ACCOUNTING").mode(),
+            AuthMode::Password
+        );
         assert_eq!(policy.resolve(None, "Accounting%").mode(), AuthMode::None);
     }
 }

@@ -1,22 +1,35 @@
 use std::path::PathBuf;
 
+use futures::future::join_all;
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::{
     AuthConfig, ClusterAlias, ClusterTarget, InfobaseAuthPolicy, RacPolicy, RasEndpoint,
+    TargetError,
 };
 use crate::infrastructure::config;
-use crate::infrastructure::telemetry::{AuditContext, AuditEvent, AuditResult, audit_actions};
 
 use super::conversion::{
     domain_auth_to_config, domain_infobase_auth_to_config, domain_rac_to_config,
     search_policy_for_new_cluster,
 };
 use super::{
-    AppError, AppErrorCategory, AppServices, Approval, RacOptions, SelectedRac,
+    AppError, AppErrorCategory, AppServices, Approval, ConfiguredTarget, RacOptions, SelectedRac,
     auth_to_rac_credentials, config_port_error, convert_config_snapshot, ensure_not_cancelled,
     normalize_cluster,
 };
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClusterStatus {
+    Ok,
+    Error(TargetError),
+}
+
+#[derive(Clone, Debug)]
+pub struct ClusterStatusEntry {
+    pub target: ClusterTarget,
+    pub status: ClusterStatus,
+}
 
 #[derive(Clone, Debug)]
 pub struct ClusterAddRequest {
@@ -66,47 +79,7 @@ impl AppServices {
         request: ClusterAddRequest,
         cancellation: &CancellationToken,
     ) -> Result<ClusterAddOutcome, AppError> {
-        let windows_user = self.audit_user().await?;
-        let result = self.add_cluster_inner(&request, cancellation).await;
-        let mut context = AuditContext {
-            cluster_alias: Some(request.alias.to_string()),
-            ..AuditContext::default()
-        };
-        let event = match &result {
-            Ok(outcome) => {
-                context.cluster_uuid = Some(outcome.target.discovered_cluster.uuid.into_uuid());
-                AuditEvent::new(
-                    windows_user,
-                    audit_actions::CLUSTER_ADD,
-                    AuditResult::Success,
-                )
-                .with_context(context)
-            }
-            Err(error) => AuditEvent::new(
-                windows_user,
-                audit_actions::CLUSTER_ADD,
-                if error.category() == AppErrorCategory::Cancelled {
-                    AuditResult::Cancelled
-                } else {
-                    AuditResult::Failure
-                },
-            )
-            .with_context(context)
-            .with_error(error.code(), error.message()),
-        };
-        let audit_result = self.audit.record(event).await;
-        match (result, audit_result) {
-            (Ok(outcome), Ok(())) => Ok(outcome),
-            (Ok(_), Err(error)) => Err(AppError::internal(
-                "audit_write_failed",
-                format!(
-                    "Подключение к кластеру добавлено, но событие аудита не записано: {}",
-                    error.message
-                ),
-            )),
-            (Err(error), Ok(())) => Err(error),
-            (Err(error), Err(audit_error)) => Err(error.with_audit_error(audit_error.message)),
-        }
+        self.add_cluster_inner(&request, cancellation).await
     }
 
     async fn add_cluster_inner(
@@ -135,15 +108,6 @@ impl AppServices {
             ));
         }
 
-        self.verify_auth_identity(&request.cluster_auth)
-            .await
-            .map_err(|error| {
-                AppError::new(
-                    AppErrorCategory::AllTargetsFailed,
-                    error.code,
-                    error.message,
-                )
-            })?;
         let search_policy = search_policy_for_new_cluster(
             snapshot.global_rac_path.clone(),
             &request.rac_policy,
@@ -241,6 +205,37 @@ impl AppServices {
         })
     }
 
+    pub async fn cluster_statuses(
+        &self,
+        options: &RacOptions,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<ClusterStatusEntry>, AppError> {
+        let snapshot = self.load_config_snapshot(cancellation).await?;
+        let entries = join_all(snapshot.targets.iter().map(|target| async {
+            let status = match self.probe_cluster(target, options, cancellation).await {
+                Ok(()) => ClusterStatus::Ok,
+                Err(error) => ClusterStatus::Error(error),
+            };
+            ClusterStatusEntry {
+                target: target.target.clone(),
+                status,
+            }
+        }))
+        .await;
+        Ok(entries)
+    }
+
+    async fn probe_cluster(
+        &self,
+        target: &ConfiguredTarget,
+        options: &RacOptions,
+        cancellation: &CancellationToken,
+    ) -> Result<(), TargetError> {
+        self.live_cluster(target, options, cancellation)
+            .await
+            .map(|_| ())
+    }
+
     pub async fn prepare_cluster_remove(
         &self,
         alias: &str,
@@ -262,45 +257,7 @@ impl AppServices {
         _approval: Approval,
         cancellation: &CancellationToken,
     ) -> Result<ClusterRemoveOutcome, AppError> {
-        let windows_user = self.audit_user().await?;
-        let result = self.remove_cluster_inner(plan, cancellation).await;
-        let context = AuditContext {
-            cluster_alias: Some(plan.target.alias.to_string()),
-            cluster_uuid: Some(plan.target.discovered_cluster.uuid.into_uuid()),
-            ..AuditContext::default()
-        };
-        let event = match &result {
-            Ok(_) => AuditEvent::new(
-                windows_user,
-                audit_actions::CLUSTER_REMOVE,
-                AuditResult::Success,
-            )
-            .with_context(context),
-            Err(error) => AuditEvent::new(
-                windows_user,
-                audit_actions::CLUSTER_REMOVE,
-                if error.category() == AppErrorCategory::Cancelled {
-                    AuditResult::Cancelled
-                } else {
-                    AuditResult::Failure
-                },
-            )
-            .with_context(context)
-            .with_error(error.code(), error.message()),
-        };
-        let audit_result = self.audit.record(event).await;
-        match (result, audit_result) {
-            (Ok(outcome), Ok(())) => Ok(outcome),
-            (Ok(_), Err(error)) => Err(AppError::internal(
-                "audit_write_failed",
-                format!(
-                    "Подключение удалено, но событие аудита не записано: {}",
-                    error.message
-                ),
-            )),
-            (Err(error), Ok(())) => Err(error),
-            (Err(error), Err(audit_error)) => Err(error.with_audit_error(audit_error.message)),
-        }
+        self.remove_cluster_inner(plan, cancellation).await
     }
 
     pub async fn remove_cluster(

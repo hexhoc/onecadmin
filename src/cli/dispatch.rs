@@ -805,17 +805,6 @@ fn render_session_action(
                 &mut error_json,
             );
         }
-        if let Some(error) = &item.audit_error {
-            push_session_action_error(
-                target,
-                "audit",
-                &error.code,
-                &error.message,
-                redactor,
-                &mut error_rows,
-                &mut error_json,
-            );
-        }
     }
 
     for error in target_errors {
@@ -856,7 +845,6 @@ fn render_session_action(
             "succeeded": outcome.meta.succeeded,
             "failed": outcome.meta.failed,
             "cancelled": outcome.meta.cancelled,
-            "audit_failed": outcome.meta.audit_failed,
             "selection_failed": target_errors.len(),
             "partial": partial,
         }),
@@ -970,17 +958,6 @@ fn render_connection_action(
                 &mut error_json,
             );
         }
-        if let Some(error) = &item.audit_error {
-            push_connection_action_error(
-                target,
-                "audit",
-                &error.code,
-                &error.message,
-                redactor,
-                &mut error_rows,
-                &mut error_json,
-            );
-        }
     }
 
     for error in target_errors {
@@ -1023,7 +1000,6 @@ fn render_connection_action(
             "succeeded": outcome.meta.succeeded,
             "failed": outcome.meta.failed,
             "cancelled": outcome.meta.cancelled,
-            "audit_failed": outcome.meta.audit_failed,
             "selection_failed": target_errors.len(),
             "partial": partial,
         }),
@@ -1139,24 +1115,6 @@ fn render_app_error_output(
         "message": message,
     })];
 
-    if let Some(audit_error) = error.audit_error() {
-        let audit_error = redactor.redact(audit_error);
-        rows.push(vec![
-            "audit".to_owned(),
-            String::new(),
-            String::new(),
-            "audit_write_failed".to_owned(),
-            audit_error.clone(),
-        ]);
-        errors.push(json!({
-            "scope": "audit",
-            "cluster": null,
-            "ras_address": null,
-            "code": "audit_write_failed",
-            "message": audit_error,
-        }));
-    }
-
     for target_error in error.target_errors() {
         let message = redactor.redact(&target_error.message);
         rows.push(vec![
@@ -1204,9 +1162,6 @@ fn sanitize_target_errors(errors: &mut [TargetError], redactor: &SecretRedactor)
 fn sanitize_action_outcome<T>(outcome: &mut ActionOutcome<T>, redactor: &SecretRedactor) {
     for item in &mut outcome.items {
         if let Some(error) = &mut item.error {
-            error.message = redactor.redact(&error.message);
-        }
-        if let Some(error) = &mut item.audit_error {
             error.message = redactor.redact(&error.message);
         }
     }

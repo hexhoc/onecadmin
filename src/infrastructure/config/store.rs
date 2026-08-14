@@ -4,7 +4,6 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use fs4::FileExt;
 use noyalib::{DuplicateKeyPolicy, ErrorKind, ParserConfig, Value};
@@ -13,28 +12,8 @@ use tempfile::NamedTempFile;
 use uuid::Uuid;
 
 use super::{
-    AclError, ClusterConfig, Config, ConfigError, InfobaseAuthOverride, SafeYamlError,
-    resolve_config_path,
+    ClusterConfig, Config, ConfigError, InfobaseAuthOverride, SafeYamlError, resolve_config_path,
 };
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AclProtection {
-    Applied,
-    NotConfigured,
-}
-
-pub trait AclProtector: Send + Sync {
-    fn protect_current_user(&self, path: &Path) -> Result<AclProtection, AclError>;
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct NoopAclProtector;
-
-impl AclProtector for NoopAclProtector {
-    fn protect_current_user(&self, _path: &Path) -> Result<AclProtection, AclError> {
-        Ok(AclProtection::NotConfigured)
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConfigSnapshot {
@@ -106,7 +85,6 @@ pub enum FormatPreservation {
 pub struct WriteOutcome {
     pub snapshot: ConfigSnapshot,
     pub format_preservation: FormatPreservation,
-    pub acl_protection: AclProtection,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,7 +136,6 @@ impl OverrideSelector {
 pub struct ConfigStore {
     path: PathBuf,
     lock_path: PathBuf,
-    acl: Arc<dyn AclProtector>,
 }
 
 impl fmt::Debug for ConfigStore {
@@ -184,28 +161,11 @@ impl ConfigStore {
         let mut lock_name = OsString::from(file_name);
         lock_name.push(".lock");
         let lock_path = path.with_file_name(lock_name);
-        Ok(Self {
-            path,
-            lock_path,
-            acl: Arc::new(NoopAclProtector),
-        })
+        Ok(Self { path, lock_path })
     }
 
     pub fn from_sources(cli_path: Option<PathBuf>) -> Result<Self, ConfigError> {
         Self::new(resolve_config_path(cli_path)?)
-    }
-
-    pub fn with_acl_protector<P>(mut self, protector: P) -> Self
-    where
-        P: AclProtector + 'static,
-    {
-        self.acl = Arc::new(protector);
-        self
-    }
-
-    pub fn with_shared_acl_protector(mut self, protector: Arc<dyn AclProtector>) -> Self {
-        self.acl = protector;
-        self
     }
 
     pub fn path(&self) -> &Path {
@@ -255,11 +215,10 @@ impl ConfigStore {
         config.validate()?;
         let yaml = serialize_config(&config)?;
         ensure_roundtrip(&self.path, &yaml, &config)?;
-        let acl_protection = self.write_atomic(&yaml)?;
+        self.write_atomic(&yaml)?;
         Ok(WriteOutcome {
             snapshot: self.snapshot(config),
             format_preservation: FormatPreservation::Canonical,
-            acl_protection,
         })
     }
 
@@ -358,11 +317,10 @@ impl ConfigStore {
                 serialize_config(&desired).map(|yaml| (yaml, FormatPreservation::CanonicalFallback))
             })?;
         ensure_roundtrip(&self.path, &yaml, &desired)?;
-        let acl_protection = self.write_atomic(&yaml)?;
+        self.write_atomic(&yaml)?;
         Ok(WriteOutcome {
             snapshot: self.snapshot(desired),
             format_preservation,
-            acl_protection,
         })
     }
 
@@ -428,7 +386,7 @@ impl ConfigStore {
         Ok(lock)
     }
 
-    fn write_atomic(&self, yaml: &str) -> Result<AclProtection, ConfigError> {
+    fn write_atomic(&self, yaml: &str) -> Result<(), ConfigError> {
         let parent = self.parent_dir();
         let mut temporary = NamedTempFile::new_in(parent).map_err(|source| ConfigError::Io {
             action: "create temporary configuration",
@@ -457,15 +415,8 @@ impl ConfigStore {
             })?;
 
         let temporary = temporary.into_temp_path();
-        let acl_protection =
-            self.acl
-                .protect_current_user(temporary.as_ref())
-                .map_err(|source| ConfigError::Acl {
-                    path: temporary.to_path_buf(),
-                    source,
-                })?;
         match temporary.persist(&self.path) {
-            Ok(()) => Ok(acl_protection),
+            Ok(()) => Ok(()),
             Err(error) => Err(ConfigError::AtomicReplace {
                 path: self.path.clone(),
                 source: error.error,
@@ -788,8 +739,7 @@ clusters:
       path: null
       version: auto
     cluster_auth:
-      mode: os
-      user: admin
+      mode: none
       password: should-never-appear
     infobase_auth:
       default:
@@ -864,35 +814,6 @@ clusters:
             .remove_override("dev", OverrideSelector::by_name("ZUP_CORP"))
             .unwrap();
         store.remove_cluster("DEV").unwrap();
-        assert!(store.load().unwrap().clusters.is_empty());
-    }
-
-    struct RejectAcl;
-
-    impl AclProtector for RejectAcl {
-        fn protect_current_user(&self, _path: &Path) -> Result<AclProtection, AclError> {
-            Err(AclError::new("test ACL rejection"))
-        }
-    }
-
-    #[test]
-    fn failed_pre_replace_step_leaves_original_file_unchanged() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.yaml");
-        ConfigStore::new(path.clone())
-            .unwrap()
-            .create_default()
-            .unwrap();
-        let before = fs::read(&path).unwrap();
-
-        let store = ConfigStore::new(path.clone())
-            .unwrap()
-            .with_acl_protector(RejectAcl);
-        assert!(matches!(
-            store.add_cluster("dev", cluster()),
-            Err(ConfigError::Acl { .. })
-        ));
-        assert_eq!(fs::read(&path).unwrap(), before);
         assert!(store.load().unwrap().clusters.is_empty());
     }
 }
