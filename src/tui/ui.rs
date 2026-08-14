@@ -14,9 +14,10 @@ use crate::domain::{
 };
 
 use super::state::{
-    App, ClusterForm, ClusterRow, CredentialForm, CredentialRow, DetailsModal, FormAuthMode,
-    LoadState, Modal, QuerySettings, RowKey, Screen, TableNav, TableScreen, TaskFailure,
-    cluster_key, cluster_status_text, connection_key, credential_key, infobase_key, session_key,
+    App, ClusterForm, ClusterPicker, ClusterRow, CredentialForm, CredentialRow, DetailsModal,
+    FormAuthMode, LoadState, Modal, QuerySettings, RowKey, Screen, TableNav, TableScreen,
+    TaskFailure, cluster_key, cluster_status_text, connection_key, credential_key, infobase_key,
+    session_key,
 };
 
 const ACCENT: Color = Color::Rgb(90, 180, 210);
@@ -532,7 +533,7 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &App) {
     ]);
     let second = Line::from(vec![
         Span::styled(
-            " / query · f filter · s sort · c columns ",
+            " / query · f filter · s sort · c columns · g кластер ",
             Style::default().fg(Color::Gray),
         ),
         Span::raw("│ "),
@@ -560,11 +561,17 @@ fn render_modal(frame: &mut Frame<'_>, modal: &Modal) {
             render_details_modal(frame, &details, true);
         }
         Modal::Edit(edit) => {
-            let area = centered_rect(82, 8, frame.area());
+            let area = centered_rect_fixed(84, 7, frame.area());
             frame.render_widget(Clear, area);
             let mut lines = vec![
                 Line::styled(edit.kind.title(), Style::default().fg(ACCENT)),
-                Line::raw(edit.value.clone()),
+                Line::raw(""),
+                Line::styled(
+                    format!("> {}", edit.value),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Line::styled(
                     "Enter применить · Ctrl+U очистить · Esc отменить",
                     Style::default().fg(MUTED),
@@ -586,11 +593,12 @@ fn render_modal(frame: &mut Frame<'_>, modal: &Modal) {
             );
             let cursor_x = area
                 .x
-                .saturating_add(1)
+                .saturating_add(3)
                 .saturating_add(UnicodeWidthStr::width(edit.value.as_str()) as u16)
                 .min(area.right().saturating_sub(2));
-            frame.set_cursor_position(Position::new(cursor_x, area.y.saturating_add(2)));
+            frame.set_cursor_position(Position::new(cursor_x, area.y.saturating_add(3)));
         }
+        Modal::ClusterPicker(picker) => render_cluster_picker(frame, picker),
         Modal::ClusterForm(form) => render_cluster_form(frame, form),
         Modal::CredentialForm(form) => render_credential_form(frame, form),
         Modal::Progress { title, .. } => {
@@ -642,6 +650,65 @@ fn render_details_modal(frame: &mut Frame<'_>, details: &DetailsModal, confirm: 
                     .borders(Borders::ALL)
                     .title(format!(" {} ", details.title))
                     .border_style(Style::default().fg(if confirm { ERROR } else { ACCENT })),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn render_cluster_picker(frame: &mut Frame<'_>, picker: &ClusterPicker) {
+    let height = (picker.options.len() as u16)
+        .saturating_add(4)
+        .min(frame.area().height)
+        .max(6);
+    let area = centered_rect_fixed(60, height, frame.area());
+    frame.render_widget(Clear, area);
+
+    let list_height = area.height.saturating_sub(3) as usize;
+    let offset = picker
+        .selected
+        .saturating_sub(list_height.saturating_sub(1))
+        .min(picker.options.len().saturating_sub(list_height));
+    let mut lines = picker
+        .options
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(list_height)
+        .map(|(index, option)| {
+            let selected = index == picker.selected;
+            let style = if selected {
+                Style::default()
+                    .bg(SELECTED)
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            Line::from(vec![
+                Span::styled(
+                    if selected { "▶ " } else { "  " },
+                    if selected {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        Style::default()
+                    },
+                ),
+                Span::styled(option.clone(), style),
+            ])
+        })
+        .collect::<Vec<_>>();
+    lines.push(Line::styled(
+        "↑↓ выбор · Enter применить · Esc отменить",
+        Style::default().fg(MUTED),
+    ));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Кластер ")
+                    .border_style(Style::default().fg(ACCENT)),
             )
             .wrap(Wrap { trim: false }),
         area,

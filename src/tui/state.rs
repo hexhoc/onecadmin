@@ -166,6 +166,7 @@ pub(crate) struct QuerySettings {
     pub filter: String,
     pub sort: String,
     pub columns: String,
+    pub cluster_filter: Option<String>,
 }
 
 impl QuerySettings {
@@ -484,11 +485,24 @@ pub(crate) enum OperationResult {
 
 #[derive(Clone, Debug)]
 pub(crate) enum RefreshWork {
-    Clusters { query: String },
-    Credentials { query: String },
-    Infobases { query: QuerySpec },
-    Sessions { query: QuerySpec },
-    Connections { query: QuerySpec },
+    Clusters {
+        query: String,
+    },
+    Credentials {
+        query: String,
+    },
+    Infobases {
+        query: QuerySpec,
+        cluster: Option<String>,
+    },
+    Sessions {
+        query: QuerySpec,
+        cluster: Option<String>,
+    },
+    Connections {
+        query: QuerySpec,
+        cluster: Option<String>,
+    },
     Diagnostics,
 }
 
@@ -561,6 +575,12 @@ pub(crate) struct ConfirmModal {
     pub lines: Vec<String>,
     pub action: ConfirmAction,
     pub scroll: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ClusterPicker {
+    pub options: Vec<String>,
+    pub selected: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -763,6 +783,7 @@ pub(crate) enum Modal {
     Details(DetailsModal),
     Confirm(Box<ConfirmModal>),
     Edit(EditModal),
+    ClusterPicker(ClusterPicker),
     ClusterForm(ClusterForm),
     CredentialForm(CredentialForm),
     Progress {
@@ -844,18 +865,21 @@ impl App {
                     .infobases
                     .settings
                     .build(RecordKind::Infobase, &self.registry)?,
+                cluster: self.infobases.settings.cluster_filter.clone(),
             },
             Screen::Sessions => RefreshWork::Sessions {
                 query: self
                     .sessions
                     .settings
                     .build(RecordKind::Session, &self.registry)?,
+                cluster: self.sessions.settings.cluster_filter.clone(),
             },
             Screen::Connections => RefreshWork::Connections {
                 query: self
                     .connections
                     .settings
                     .build(RecordKind::Connection, &self.registry)?,
+                cluster: self.connections.settings.cluster_filter.clone(),
             },
             Screen::Diagnostics => RefreshWork::Diagnostics,
         };
@@ -1414,6 +1438,10 @@ impl App {
                 self.open_edit(EditKind::Columns);
                 Vec::new()
             }
+            KeyCode::Char('g') | KeyCode::Char('G') => {
+                self.open_cluster_picker();
+                Vec::new()
+            }
             KeyCode::Char('n') | KeyCode::Char('N') => {
                 self.open_add_form();
                 Vec::new()
@@ -1552,6 +1580,47 @@ impl App {
                     Vec::new()
                 }
             },
+            Modal::ClusterPicker(mut picker) => match key.code {
+                KeyCode::Esc => Vec::new(),
+                KeyCode::Up => {
+                    picker.selected = picker.selected.saturating_sub(1);
+                    self.modal = Some(Modal::ClusterPicker(picker));
+                    Vec::new()
+                }
+                KeyCode::Down => {
+                    picker.selected = (picker.selected + 1).min(picker.options.len() - 1);
+                    self.modal = Some(Modal::ClusterPicker(picker));
+                    Vec::new()
+                }
+                KeyCode::Home => {
+                    picker.selected = 0;
+                    self.modal = Some(Modal::ClusterPicker(picker));
+                    Vec::new()
+                }
+                KeyCode::End => {
+                    picker.selected = picker.options.len() - 1;
+                    self.modal = Some(Modal::ClusterPicker(picker));
+                    Vec::new()
+                }
+                KeyCode::Enter => {
+                    let alias = if picker.selected == 0 {
+                        None
+                    } else {
+                        picker.options.get(picker.selected).cloned()
+                    };
+                    self.current_settings_mut().cluster_filter = alias;
+                    self.status = match self.current_settings().cluster_filter.as_deref() {
+                        Some(alias) => format!("Фильтр по кластеру: {alias}"),
+                        None => "Фильтр по кластеру: все кластеры".to_owned(),
+                    };
+                    self.status_is_error = false;
+                    vec![Intent::Refresh(self.screen)]
+                }
+                _ => {
+                    self.modal = Some(Modal::ClusterPicker(picker));
+                    Vec::new()
+                }
+            },
             Modal::ClusterForm(mut form) => match key.code {
                 KeyCode::Esc => Vec::new(),
                 KeyCode::Enter => match form.build(self.rac_options.clone()) {
@@ -1678,6 +1747,39 @@ impl App {
             value,
             error: None,
         }));
+    }
+
+    fn open_cluster_picker(&mut self) {
+        if self.screen.record_kind().is_none() || self.screen == Screen::Diagnostics {
+            self.set_status_error(
+                "Фильтр по кластеру доступен в разделах баз, сеансов и соединений".to_owned(),
+            );
+            return;
+        }
+        let aliases = self.cluster_aliases();
+        let mut options = Vec::with_capacity(aliases.len() + 1);
+        options.push("Все кластеры".to_owned());
+        options.extend(aliases);
+        let selected = self
+            .current_settings()
+            .cluster_filter
+            .as_deref()
+            .and_then(|alias| options.iter().position(|option| option == alias))
+            .unwrap_or(0);
+        self.modal = Some(Modal::ClusterPicker(ClusterPicker { options, selected }));
+    }
+
+    fn cluster_aliases(&self) -> Vec<String> {
+        let LoadState::Data(rows) = &self.clusters.resource.state else {
+            return Vec::new();
+        };
+        let mut aliases = rows
+            .iter()
+            .map(|row| row.target.alias.to_string())
+            .collect::<Vec<_>>();
+        aliases.sort();
+        aliases.dedup();
+        aliases
     }
 
     fn change_screen(&mut self, direction: isize) -> Vec<Intent> {
@@ -1950,6 +2052,9 @@ impl App {
         }
         let settings = self.current_settings();
         let mut parts = Vec::new();
+        if let Some(cluster) = settings.cluster_filter.as_deref() {
+            parts.push(format!("cluster={cluster}"));
+        }
         if !settings.query.is_empty() {
             parts.push(format!("query={}", settings.query));
         }
@@ -2362,6 +2467,7 @@ fn help_lines() -> Vec<String> {
         "F5: ручное обновление (overlap не допускается)",
         "a: автообновление; [ ]: интервалы 5/10/30/60 с; i: свой интервал",
         "/: query; f: filter; s: sort; c: columns",
+        "g: фильтр по кластеру (выпадающий список)",
         "Space: отметить несколько сеансов/соединений",
         "k: подготовить точные планы и запросить подтверждение kill",
         "n: добавить кластер/credential override; Delete/x: удалить",
@@ -2377,9 +2483,35 @@ fn help_lines() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{DiscoveredCluster, InfobaseAuthPolicy};
 
     fn options() -> TuiOptions {
         TuiOptions::new()
+    }
+
+    fn cluster_row(alias: &str) -> ClusterRow {
+        let alias = ClusterAlias::new(alias).unwrap_or_else(|error| panic!("{error}"));
+        let ras: RasEndpoint = "ras.local:1545"
+            .parse()
+            .unwrap_or_else(|error| panic!("{error}"));
+        let cluster = DiscoveredCluster::new(
+            ClusterUuid::new(Uuid::new_v4()),
+            "cluster",
+            "cluster.local",
+            1541,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        ClusterRow {
+            target: ClusterTarget::new(
+                alias,
+                ras,
+                cluster,
+                RacPolicy::Auto,
+                AuthConfig::none(),
+                InfobaseAuthPolicy::default(),
+            ),
+            status: ClusterStatus::Ok,
+        }
     }
 
     #[test]
@@ -2481,5 +2613,29 @@ mod tests {
             auto.set_interval(super::super::MIN_REFRESH_INTERVAL, Instant::now())
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn cluster_picker_lists_aliases_and_filters_refresh() {
+        let mut app = App::new(&options());
+        app.screen = Screen::Sessions;
+        app.clusters.resource.state =
+            LoadState::Data(vec![cluster_row("dev"), cluster_row("prod")]);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        let Modal::ClusterPicker(picker) = app.modal.as_ref().unwrap_or_else(|| panic!("no modal"))
+        else {
+            panic!("ожидался выбор кластера");
+        };
+        assert_eq!(picker.options, vec!["Все кластеры", "dev", "prod"]);
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let intents = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.sessions.settings.cluster_filter.as_deref(), Some("dev"));
+        assert!(matches!(
+            intents.as_slice(),
+            [Intent::Refresh(Screen::Sessions)]
+        ));
     }
 }

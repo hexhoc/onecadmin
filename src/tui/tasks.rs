@@ -63,11 +63,12 @@ async fn run_refresh(
         RefreshWork::Credentials { query } => {
             BackgroundPayload::Credentials(load_credentials(services, &query, cancellation).await)
         }
-        RefreshWork::Infobases { query } => {
-            let result = InfobaseSearchRequest::new("%").map(|mut request| {
+        RefreshWork::Infobases { query, cluster } => {
+            let result = InfobaseSearchRequest::new("%").and_then(|mut request| {
                 request.query = Some(query);
+                request.clusters = ClusterSelector::parse(cluster.as_deref())?;
                 request.rac_options = rac_options.clone();
-                request
+                Ok(request)
             });
             BackgroundPayload::Infobases(match result {
                 Ok(request) => services
@@ -77,11 +78,17 @@ async fn run_refresh(
                 Err(error) => Err(TaskFailure::from(error)),
             })
         }
-        RefreshWork::Sessions { query } => {
-            let request = SessionListRequest {
-                query: Some(query),
-                rac_options: rac_options.clone(),
-                ..SessionListRequest::default()
+        RefreshWork::Sessions { query, cluster } => {
+            let request = match ClusterSelector::parse(cluster.as_deref()) {
+                Ok(clusters) => SessionListRequest {
+                    clusters,
+                    query: Some(query),
+                    rac_options: rac_options.clone(),
+                    ..SessionListRequest::default()
+                },
+                Err(error) => {
+                    return BackgroundPayload::Sessions(Err(TaskFailure::from(error)));
+                }
             };
             BackgroundPayload::Sessions(
                 services
@@ -90,11 +97,17 @@ async fn run_refresh(
                     .map_err(TaskFailure::from),
             )
         }
-        RefreshWork::Connections { query } => {
-            let request = ConnectionListRequest {
-                query: Some(query),
-                rac_options: rac_options.clone(),
-                ..ConnectionListRequest::default()
+        RefreshWork::Connections { query, cluster } => {
+            let request = match ClusterSelector::parse(cluster.as_deref()) {
+                Ok(clusters) => ConnectionListRequest {
+                    clusters,
+                    query: Some(query),
+                    rac_options: rac_options.clone(),
+                    ..ConnectionListRequest::default()
+                },
+                Err(error) => {
+                    return BackgroundPayload::Connections(Err(TaskFailure::from(error)));
+                }
             };
             BackgroundPayload::Connections(
                 services
