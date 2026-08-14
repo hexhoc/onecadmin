@@ -48,6 +48,17 @@ impl TerminalGuard {
         terminal.draw(render).map(|_| ())
     }
 
+    pub(crate) fn set_mouse_capture(&mut self, enabled: bool) -> io::Result<()> {
+        let Some(terminal) = self.terminal.as_mut() else {
+            return Ok(());
+        };
+        if enabled {
+            execute!(terminal.backend_mut(), EnableMouseCapture)
+        } else {
+            execute!(terminal.backend_mut(), DisableMouseCapture)
+        }
+    }
+
     fn restore(&mut self) {
         if let Some(terminal) = self.terminal.as_mut() {
             let _ = terminal.show_cursor();

@@ -1,8 +1,11 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use arboard::Clipboard;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use ratatui::layout::{Position, Rect};
 use tokio::time::Instant;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use uuid::Uuid;
 use zeroize::Zeroize;
 
@@ -584,6 +587,13 @@ pub(crate) enum Intent {
     Refresh(Screen),
     Spawn(Box<Job>),
     Cancel(RequestId),
+    ToggleMouseCapture,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TextSelection {
+    pub start: (usize, usize),
+    pub end: (usize, usize),
 }
 
 #[derive(Clone, Debug)]
@@ -591,6 +601,9 @@ pub(crate) struct DetailsModal {
     pub title: String,
     pub lines: Vec<String>,
     pub scroll: usize,
+    pub selection: Option<TextSelection>,
+    pub text_area: Option<Rect>,
+    pub rows: Option<Vec<(usize, usize, usize)>>,
 }
 
 #[derive(Clone, Debug)]
@@ -605,6 +618,8 @@ pub(crate) struct ConfirmModal {
 pub(crate) struct ClusterPicker {
     pub options: Vec<String>,
     pub selected: usize,
+    pub list_area: Option<Rect>,
+    pub offset: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -831,6 +846,11 @@ pub(crate) struct App {
     pub status_is_error: bool,
     pub local_errors: Vec<String>,
     pub registry: FieldRegistry,
+    pub tab_area: Option<Rect>,
+    pub table_area: Option<Rect>,
+    pub mouse_capture: bool,
+    last_click_index: Option<usize>,
+    last_click_time: Option<Instant>,
     rac_options: RacOptions,
     next_request_id: u64,
     operation: Option<RequestId>,
@@ -857,6 +877,11 @@ impl App {
             status_is_error: false,
             local_errors: Vec::new(),
             registry: FieldRegistry::new(),
+            tab_area: None,
+            table_area: None,
+            mouse_capture: true,
+            last_click_index: None,
+            last_click_time: None,
             rac_options: options.rac_options().clone(),
             next_request_id: 0,
             operation: None,
@@ -1263,6 +1288,9 @@ impl App {
                     title: "Ошибка операции".to_owned(),
                     lines: failure_lines(&failure),
                     scroll: 0,
+                    selection: None,
+                    text_area: None,
+                    rows: None,
                 }));
                 Vec::new()
             }
@@ -1417,6 +1445,9 @@ impl App {
             title: "Операция завершена".to_owned(),
             lines: vec![message],
             scroll: 0,
+            selection: None,
+            text_area: None,
+            rows: None,
         }));
     }
 
@@ -1440,6 +1471,9 @@ impl App {
             title: title.to_owned(),
             lines,
             scroll: 0,
+            selection: None,
+            text_area: None,
+            rows: None,
         }));
     }
 
@@ -1448,6 +1482,11 @@ impl App {
             && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
         {
             return vec![Intent::Quit];
+        }
+        if !key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('m') | KeyCode::Char('M'))
+        {
+            return self.toggle_mouse_capture();
         }
         if self.modal.is_some() {
             return self.handle_modal_key(key);
@@ -1554,6 +1593,9 @@ impl App {
                     title: "Справка".to_owned(),
                     lines: help_lines(),
                     scroll: 0,
+                    selection: None,
+                    text_area: None,
+                    rows: None,
                 }));
                 Vec::new()
             }
@@ -1564,6 +1606,143 @@ impl App {
             }
             _ => Vec::new(),
         }
+    }
+
+    fn toggle_mouse_capture(&mut self) -> Vec<Intent> {
+        self.mouse_capture = !self.mouse_capture;
+        self.status = if self.mouse_capture {
+            "Мышь: управление интерфейсом (m — выделение текста)".to_owned()
+        } else {
+            "Мышь: выделение текста (m — управление интерфейсом)".to_owned()
+        };
+        self.status_is_error = false;
+        vec![Intent::ToggleMouseCapture]
+    }
+
+    pub(crate) fn handle_mouse(&mut self, event: MouseEvent) -> Vec<Intent> {
+        if let Some(modal) = self.modal.as_mut() {
+            match modal {
+                Modal::ClusterPicker(picker) => match event.kind {
+                    MouseEventKind::ScrollUp => {
+                        picker.selected = picker.selected.saturating_sub(1);
+                    }
+                    MouseEventKind::ScrollDown => {
+                        picker.selected = (picker.selected + 1).min(picker.options.len() - 1);
+                    }
+                    MouseEventKind::Down(_) => {
+                        if let Some(area) = picker.list_area {
+                            let position = Position::new(event.column, event.row);
+                            if area.contains(position) {
+                                let index = picker.offset + (event.row - area.y) as usize;
+                                if index < picker.options.len() {
+                                    picker.selected = index;
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                Modal::Details(details) => match event.kind {
+                    MouseEventKind::ScrollUp => details.scroll = details.scroll.saturating_sub(1),
+                    MouseEventKind::ScrollDown => details.scroll = details.scroll.saturating_add(1),
+                    MouseEventKind::Down(_) => {
+                        if let Some(pos) = details_pos_at(details, event.column, event.row) {
+                            details.selection = Some(TextSelection {
+                                start: pos,
+                                end: pos,
+                            });
+                        }
+                    }
+                    MouseEventKind::Drag(_) => {
+                        if let (Some(selection), Some(pos)) = (
+                            details.selection,
+                            details_pos_at(details, event.column, event.row),
+                        ) {
+                            details.selection = Some(TextSelection {
+                                start: selection.start,
+                                end: pos,
+                            });
+                        }
+                    }
+                    MouseEventKind::Up(_) => {
+                        if let Some(selection) = details.selection.take() {
+                            let text = details_copy_selection(&details.lines, selection);
+                            if !text.is_empty()
+                                && let Ok(mut clipboard) = Clipboard::new()
+                                && clipboard.set_text(text).is_ok()
+                            {
+                                self.status = "Текст скопирован в буфер обмена".to_owned();
+                                self.status_is_error = false;
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                Modal::Confirm(confirm) => match event.kind {
+                    MouseEventKind::ScrollUp => confirm.scroll = confirm.scroll.saturating_sub(1),
+                    MouseEventKind::ScrollDown => confirm.scroll = confirm.scroll.saturating_add(1),
+                    _ => {}
+                },
+                _ => {}
+            }
+            // Any open modal owns the mouse: never leak clicks to the tabs/table behind it.
+            return Vec::new();
+        }
+
+        match event.kind {
+            MouseEventKind::ScrollUp => {
+                self.navigate(-1, false);
+                return Vec::new();
+            }
+            MouseEventKind::ScrollDown => {
+                self.navigate(1, false);
+                return Vec::new();
+            }
+            MouseEventKind::Down(_) => {}
+            _ => return Vec::new(),
+        }
+        let position = Position::new(event.column, event.row);
+
+        if let Some(area) = self.tab_area
+            && area.contains(position)
+            && let Some(screen) = tab_at(area, event.column)
+            && screen != self.screen
+        {
+            self.screen = screen;
+            self.status = format!("Раздел: {}", screen.title());
+            self.status_is_error = false;
+            return self.initial_refresh_intent();
+        }
+
+        if let Some(area) = self.table_area
+            && event.column >= area.x
+            && event.column < area.right()
+        {
+            let first_data_row = area.y.saturating_add(2);
+            if event.row >= first_data_row && event.row < area.bottom() {
+                let relative = (event.row - first_data_row) as usize;
+                let len = self.current_len();
+                if len > 0 {
+                    let (index, is_double) = {
+                        let nav = self.current_nav_mut();
+                        let index = nav.offset.saturating_add(relative).min(len - 1);
+                        nav.selected = Some(index);
+                        let now = Instant::now();
+                        let is_double = self.last_click_index == Some(index)
+                            && self.last_click_time.is_some_and(|time| {
+                                now.duration_since(time) <= DOUBLE_CLICK_THRESHOLD
+                            });
+                        (index, is_double)
+                    };
+                    self.last_click_index = Some(index);
+                    self.last_click_time = Some(Instant::now());
+                    if is_double {
+                        self.open_details();
+                    }
+                }
+            }
+        }
+        Vec::new()
     }
 
     fn handle_modal_key(&mut self, key: KeyEvent) -> Vec<Intent> {
@@ -1871,7 +2050,12 @@ impl App {
             .as_deref()
             .and_then(|alias| options.iter().position(|option| option == alias))
             .unwrap_or(0);
-        self.modal = Some(Modal::ClusterPicker(ClusterPicker { options, selected }));
+        self.modal = Some(Modal::ClusterPicker(ClusterPicker {
+            options,
+            selected,
+            list_area: None,
+            offset: 0,
+        }));
     }
 
     fn cluster_aliases(&self) -> Vec<String> {
@@ -2052,6 +2236,9 @@ impl App {
                 title: format!("Детали: {}", self.screen.title()),
                 lines,
                 scroll: 0,
+                selection: None,
+                text_area: None,
+                rows: None,
             }));
         }
     }
@@ -2646,12 +2833,110 @@ fn help_lines() -> Vec<String> {
         "k: подготовить точные планы и запросить подтверждение kill",
         "n: добавить кластер/credential override; Delete/x: удалить",
         "F2 или ← → на auth_mode: none/password",
+        "m: переключить мышь (выделение текста / управление интерфейсом)",
         "Esc: закрыть окно/отменить задачу; на основном экране выйти",
         "q или Ctrl+C: выйти",
     ]
     .into_iter()
     .map(str::to_owned)
     .collect()
+}
+
+fn tab_at(tab_area: Rect, column: u16) -> Option<Screen> {
+    let mut x = tab_area.x;
+    for (index, screen) in Screen::ALL.iter().enumerate() {
+        let title = format!(" {} {} ", index + 1, screen.title());
+        let width = UnicodeWidthStr::width(title.as_str()) as u16;
+        let end = x.saturating_add(1).saturating_add(width).saturating_add(1);
+        if column >= x && column < end {
+            return Some(*screen);
+        }
+        x = end.saturating_add(1);
+        if x >= tab_area.right() {
+            break;
+        }
+    }
+    None
+}
+
+const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(400);
+
+pub(crate) fn details_visual_rows(
+    lines: &[String],
+    width: usize,
+    scroll: usize,
+    height: usize,
+) -> Vec<(usize, usize, usize)> {
+    let width = width.max(1);
+    let mut rows = Vec::with_capacity(height);
+    'outer: for (line_index, line) in lines.iter().enumerate().skip(scroll) {
+        if line.is_empty() {
+            rows.push((line_index, 0, 0));
+        } else {
+            let mut row_start = 0;
+            let mut col = 0;
+            for (byte, ch) in line.char_indices() {
+                let w = ch.width().unwrap_or(1);
+                if col + w > width && col > 0 {
+                    rows.push((line_index, row_start, byte));
+                    row_start = byte;
+                    col = 0;
+                    if rows.len() >= height {
+                        break 'outer;
+                    }
+                }
+                col += w;
+            }
+            rows.push((line_index, row_start, line.len()));
+        }
+        if rows.len() >= height {
+            break;
+        }
+    }
+    rows.truncate(height);
+    rows
+}
+
+fn details_pos_at(details: &DetailsModal, column: u16, row: u16) -> Option<(usize, usize)> {
+    let area = details.text_area?;
+    if !area.contains(Position::new(column, row)) {
+        return None;
+    }
+    let rows = details.rows.as_ref()?;
+    let visual_row = (row - area.y) as usize;
+    let (line_index, byte_start, byte_end) = *rows.get(visual_row)?;
+    let visual_col = (column - area.x) as usize;
+    let line = &details.lines[line_index];
+    let mut col = 0;
+    for (byte, ch) in line[byte_start..byte_end].char_indices() {
+        let w = ch.width().unwrap_or(1);
+        if visual_col < col + w {
+            return Some((line_index, byte_start + byte));
+        }
+        col += w;
+    }
+    Some((line_index, byte_end))
+}
+
+fn details_copy_selection(lines: &[String], selection: TextSelection) -> String {
+    let (start, end) = if selection.start <= selection.end {
+        (selection.start, selection.end)
+    } else {
+        (selection.end, selection.start)
+    };
+    let (start_line, start_byte) = start;
+    let (end_line, end_byte) = end;
+    if start_line == end_line {
+        lines[start_line][start_byte..end_byte].to_owned()
+    } else {
+        let mut parts = Vec::new();
+        parts.push(lines[start_line][start_byte..].to_owned());
+        for line in lines.iter().take(end_line).skip(start_line + 1) {
+            parts.push(line.clone());
+        }
+        parts.push(lines[end_line][..end_byte].to_owned());
+        parts.join("\n")
+    }
 }
 
 #[cfg(test)]
@@ -2811,5 +3096,100 @@ mod tests {
             intents.as_slice(),
             [Intent::Refresh(Screen::Sessions)]
         ));
+    }
+
+    #[test]
+    fn tab_at_maps_columns_to_screens() {
+        let area = Rect::new(2, 1, 120, 1);
+        assert_eq!(tab_at(area, 2), Some(Screen::Clusters));
+
+        let first_width = UnicodeWidthStr::width(" 1 Кластеры ") as u16;
+        let second_start = area.x + 1 + first_width + 1 + 1;
+        assert_eq!(tab_at(area, second_start), Some(Screen::Credentials));
+        assert_eq!(tab_at(area, 1_000), None);
+    }
+
+    #[test]
+    fn mouse_click_selects_table_row_and_m_toggles_capture() {
+        let mut app = App::new(&options());
+        app.screen = Screen::Clusters;
+        app.clusters.resource.state =
+            LoadState::Data(vec![cluster_row("dev"), cluster_row("prod")]);
+        app.table_area = Some(Rect::new(0, 5, 80, 20));
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 3,
+            row: 8,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.clusters.nav.selected, Some(1));
+
+        assert!(app.mouse_capture);
+        let intents = app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+        assert!(!app.mouse_capture);
+        assert!(matches!(intents.as_slice(), [Intent::ToggleMouseCapture]));
+    }
+
+    #[test]
+    fn double_click_opens_details_modal() {
+        let mut app = App::new(&options());
+        app.screen = Screen::Clusters;
+        app.clusters.resource.state = LoadState::Data(vec![cluster_row("dev")]);
+        app.table_area = Some(Rect::new(0, 5, 80, 20));
+
+        let click = |app: &mut App| {
+            app.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: 3,
+                row: 7,
+                modifiers: KeyModifiers::NONE,
+            });
+        };
+        click(&mut app);
+        assert!(app.modal.is_none());
+        click(&mut app);
+        assert!(matches!(app.modal, Some(Modal::Details(_))));
+    }
+
+    #[test]
+    fn details_pos_at_maps_to_character_in_scrolled_line() {
+        let mut details = DetailsModal {
+            title: "x".to_owned(),
+            lines: vec!["hello".to_owned(), "world".to_owned(), "foo".to_owned()],
+            scroll: 1,
+            selection: None,
+            text_area: Some(Rect::new(10, 5, 40, 2)),
+            rows: None,
+        };
+        details.rows = Some(details_visual_rows(&details.lines, 40, details.scroll, 2));
+
+        assert_eq!(details_pos_at(&details, 10, 5), Some((1, 0)));
+        assert_eq!(details_pos_at(&details, 12, 5), Some((1, 2)));
+        assert_eq!(details_pos_at(&details, 10, 6), Some((2, 0)));
+        assert_eq!(details_pos_at(&details, 9, 5), None);
+    }
+
+    #[test]
+    fn details_copy_selection_handles_partial_and_multiline() {
+        let lines = vec!["abcde".to_owned(), "fghij".to_owned(), "klmno".to_owned()];
+
+        let sel = TextSelection {
+            start: (0, 1),
+            end: (0, 4),
+        };
+        assert_eq!(details_copy_selection(&lines, sel), "bcd");
+
+        let sel = TextSelection {
+            start: (0, 2),
+            end: (2, 3),
+        };
+        assert_eq!(details_copy_selection(&lines, sel), "cde\nfghij\nklm");
+
+        let sel = TextSelection {
+            start: (2, 3),
+            end: (0, 2),
+        };
+        assert_eq!(details_copy_selection(&lines, sel), "cde\nfghij\nklm");
     }
 }

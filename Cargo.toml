@@ -8,6 +8,7 @@ license = "MIT"
 
 [dependencies]
 anyhow = "1"
+arboard = "3"
 async-trait = "=0.1.92"
 chrono = { version = "=0.4.45", features = ["clock", "serde"] }
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }

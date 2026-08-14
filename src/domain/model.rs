@@ -633,6 +633,15 @@ fn process_extra_field<'a>(extra: &'a ExtraFields, name: &str) -> Option<FieldVa
     extra.get(key).map(FieldValue::as_ref)
 }
 
+/// Maps the `description` column to the raw RAC `descr` extra field.
+fn infobase_extra_field<'a>(extra: &'a ExtraFields, name: &str) -> Option<FieldValueRef<'a>> {
+    let key = match name {
+        "description" => "descr",
+        other => other,
+    };
+    extra.get(key).map(FieldValue::as_ref)
+}
+
 fn source_field<'a>(source: &'a ClusterSource, name: &str) -> Option<FieldValueRef<'a>> {
     Some(match name {
         "cluster" => FieldValueRef::Str(source.cluster.as_str()),

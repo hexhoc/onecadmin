@@ -130,6 +130,7 @@ pub async fn run(
     dispatch_intents(
         vec![Intent::Refresh(Screen::Clusters)],
         &mut app,
+        &mut terminal,
         services,
         &sender,
         &task_root,
@@ -151,6 +152,7 @@ pub async fn run(
                 if dispatch_intents(
                     intents,
                     &mut app,
+                    &mut terminal,
                     services,
                     &sender,
                     &task_root,
@@ -168,6 +170,7 @@ pub async fn run(
                         if dispatch_intents(
                             intents,
                             &mut app,
+                            &mut terminal,
                             services,
                             &sender,
                             &task_root,
@@ -177,6 +180,20 @@ pub async fn run(
                         }
                     }
                     Some(Ok(Event::Resize(_, _))) => {}
+                    Some(Ok(Event::Mouse(mouse))) => {
+                        let intents = app.handle_mouse(mouse);
+                        if dispatch_intents(
+                            intents,
+                            &mut app,
+                            &mut terminal,
+                            services,
+                            &sender,
+                            &task_root,
+                            &mut task_tokens,
+                        ) {
+                            break Ok(());
+                        }
+                    }
                     Some(Ok(_)) => {}
                     Some(Err(error)) => break Err(TuiError::Terminal(error)),
                     None => break Err(TuiError::EventStreamClosed),
@@ -187,6 +204,7 @@ pub async fn run(
                 if dispatch_intents(
                     intents,
                     &mut app,
+                    &mut terminal,
                     services,
                     &sender,
                     &task_root,
@@ -208,6 +226,7 @@ pub async fn run(
 fn dispatch_intents(
     intents: Vec<Intent>,
     app: &mut App,
+    terminal: &mut TerminalGuard,
     services: &AppServices,
     sender: &mpsc::UnboundedSender<BackgroundMessage>,
     task_root: &CancellationToken,
@@ -216,6 +235,9 @@ fn dispatch_intents(
     for intent in intents {
         match intent {
             Intent::Quit => return true,
+            Intent::ToggleMouseCapture => {
+                let _ = terminal.set_mouse_capture(app.mouse_capture);
+            }
             Intent::Refresh(screen) => match app.begin_refresh(screen) {
                 Ok(Some(job)) => {
                     let token = task_root.child_token();

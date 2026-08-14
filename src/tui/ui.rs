@@ -16,8 +16,8 @@ use crate::domain::{
 use super::state::{
     App, ClusterForm, ClusterPicker, ClusterRow, CredentialForm, CredentialRow, DetailsModal,
     FormAuthMode, LoadState, Modal, QuerySettings, RowKey, Screen, TableNav, TableScreen,
-    TaskFailure, cluster_key, cluster_status_text, connection_key, credential_key, infobase_key,
-    process_key, session_key,
+    TaskFailure, TextSelection, cluster_key, cluster_status_text, connection_key, credential_key,
+    details_visual_rows, infobase_key, process_key, session_key,
 };
 
 const ACCENT: Color = Color::Rgb(90, 180, 210);
@@ -46,6 +46,14 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App) {
             Constraint::Length(3),
         ])
         .split(area);
+
+    app.tab_area = Some(Rect::new(
+        sections[0].x.saturating_add(1),
+        sections[0].y.saturating_add(1),
+        sections[0].width.saturating_sub(2),
+        1,
+    ));
+    app.table_area = Some(sections[2]);
 
     render_tabs(frame, sections[0], app.screen);
     render_settings(frame, sections[1], app);
@@ -97,7 +105,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App) {
     }
     render_status(frame, sections[3], app);
 
-    if let Some(modal) = &app.modal {
+    if let Some(modal) = app.modal.as_mut() {
         render_modal(frame, modal);
     }
 }
@@ -384,6 +392,8 @@ fn column_constraint(header: &str) -> Constraint {
         Constraint::Length(36)
     } else if header.ends_with("_at") || header == "on" {
         Constraint::Length(21)
+    } else if header == "description" {
+        Constraint::Length(60)
     } else if matches!(header, "connection_string" | "path" | "message") {
         Constraint::Length(32)
     } else if matches!(header, "cluster" | "auth" | "auth_mode" | "port" | "sel") {
@@ -545,7 +555,7 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &App) {
     ]);
     let second = Line::from(vec![
         Span::styled(
-            " / query · f filter · s sort · c columns · g кластер ",
+            " / query · f filter · s sort · c columns · g кластер · m мышь ",
             Style::default().fg(Color::Gray),
         ),
         Span::raw("│ "),
@@ -561,16 +571,19 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &App) {
     );
 }
 
-fn render_modal(frame: &mut Frame<'_>, modal: &Modal) {
+fn render_modal(frame: &mut Frame<'_>, modal: &mut Modal) {
     match modal {
         Modal::Details(details) => render_details_modal(frame, details, false),
         Modal::Confirm(confirm) => {
-            let details = DetailsModal {
+            let mut details = DetailsModal {
                 title: confirm.title.clone(),
                 lines: confirm.lines.clone(),
                 scroll: confirm.scroll,
+                selection: None,
+                text_area: None,
+                rows: None,
             };
-            render_details_modal(frame, &details, true);
+            render_details_modal(frame, &mut details, true);
         }
         Modal::Edit(edit) => {
             let area = centered_rect_fixed(84, 7, frame.area());
@@ -634,18 +647,39 @@ fn render_modal(frame: &mut Frame<'_>, modal: &Modal) {
     }
 }
 
-fn render_details_modal(frame: &mut Frame<'_>, details: &DetailsModal, confirm: bool) {
+fn render_details_modal(frame: &mut Frame<'_>, details: &mut DetailsModal, confirm: bool) {
     let area = centered_rect(90, 80, frame.area());
     frame.render_widget(Clear, area);
     let inner_height = area.height.saturating_sub(3) as usize;
     let max_scroll = details.lines.len().saturating_sub(inner_height.max(1));
     let scroll = details.scroll.min(max_scroll);
-    let mut lines = details
-        .lines
+    let text_area = Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        inner_height as u16,
+    );
+    details.text_area = Some(text_area);
+
+    let rows = details_visual_rows(
+        &details.lines,
+        text_area.width as usize,
+        scroll,
+        inner_height,
+    );
+    details.rows = Some(rows.clone());
+
+    let mut lines = rows
         .iter()
-        .skip(scroll)
-        .take(inner_height)
-        .map(|line| Line::raw(line.clone()))
+        .map(|&(line_index, byte_start, byte_end)| {
+            Line::from(details_row_spans(
+                &details.lines,
+                line_index,
+                byte_start,
+                byte_end,
+                details.selection,
+            ))
+        })
         .collect::<Vec<_>>();
     if confirm {
         lines.push(Line::styled(
@@ -668,7 +702,52 @@ fn render_details_modal(frame: &mut Frame<'_>, details: &DetailsModal, confirm: 
     );
 }
 
-fn render_cluster_picker(frame: &mut Frame<'_>, picker: &ClusterPicker) {
+fn details_row_spans(
+    lines: &[String],
+    line_index: usize,
+    byte_start: usize,
+    byte_end: usize,
+    selection: Option<TextSelection>,
+) -> Vec<Span<'static>> {
+    let line = &lines[line_index];
+    let Some(sel) = selection else {
+        return vec![Span::raw(line[byte_start..byte_end].to_owned())];
+    };
+    let (start, end) = if sel.start <= sel.end {
+        (sel.start, sel.end)
+    } else {
+        (sel.end, sel.start)
+    };
+    let (start_line, start_byte) = start;
+    let (end_line, end_byte) = end;
+
+    let overlap_start = if line_index < start_line {
+        byte_end
+    } else if line_index == start_line {
+        byte_start.max(start_byte)
+    } else {
+        byte_start
+    };
+    let overlap_end = if line_index > end_line {
+        byte_start
+    } else if line_index == end_line {
+        byte_end.min(end_byte)
+    } else {
+        byte_end
+    };
+
+    if overlap_start >= overlap_end {
+        return vec![Span::raw(line[byte_start..byte_end].to_owned())];
+    }
+    let selected = Style::default().bg(Color::White).fg(Color::Black);
+    vec![
+        Span::raw(line[byte_start..overlap_start].to_owned()),
+        Span::styled(line[overlap_start..overlap_end].to_owned(), selected),
+        Span::raw(line[overlap_end..byte_end].to_owned()),
+    ]
+}
+
+fn render_cluster_picker(frame: &mut Frame<'_>, picker: &mut ClusterPicker) {
     let height = (picker.options.len() as u16)
         .saturating_add(4)
         .min(frame.area().height)
@@ -681,6 +760,15 @@ fn render_cluster_picker(frame: &mut Frame<'_>, picker: &ClusterPicker) {
         .selected
         .saturating_sub(list_height.saturating_sub(1))
         .min(picker.options.len().saturating_sub(list_height));
+
+    picker.offset = offset;
+    picker.list_area = Some(Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        list_height as u16,
+    ));
+
     let mut lines = picker
         .options
         .iter()
@@ -711,7 +799,7 @@ fn render_cluster_picker(frame: &mut Frame<'_>, picker: &ClusterPicker) {
         })
         .collect::<Vec<_>>();
     lines.push(Line::styled(
-        "↑↓ выбор · Enter применить · Esc отменить",
+        "↑↓/колесо/клик · Enter применить · Esc отменить",
         Style::default().fg(MUTED),
     ));
     frame.render_widget(
