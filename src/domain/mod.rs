@@ -14,13 +14,14 @@ pub use fields::{
     FieldDefinition, FieldRegistry, FieldUnit, FilterOperator, SortDirection, SortKey,
 };
 pub use kill::{
-    ConnectionKillPlan, ConnectionKillTarget, DEFAULT_SESSION_KILL_MESSAGE, SessionKillPlan,
-    SessionKillTarget, SnapshotId,
+    ConnectionKillPlan, ConnectionKillTarget, DEFAULT_SESSION_KILL_MESSAGE, ProcessKillPlan,
+    ProcessKillTarget, SessionKillPlan, SessionKillTarget, SnapshotId,
 };
 pub use mask::SqlMask;
 pub use model::{
     ClusterSource, ClusterTarget, ConnectionRecord, DiscoveredCluster, FieldAccess,
-    InfobaseAuthOverride, InfobaseAuthPolicy, InfobaseRecord, RacPolicy, RecordKind, SessionRecord,
+    InfobaseAuthOverride, InfobaseAuthPolicy, InfobaseRecord, ProcessRecord, RacPolicy, RecordKind,
+    SessionRecord,
 };
 pub use outcome::{QueryMeta, QueryOutcome, TargetError, TargetErrorKind};
 pub use query::{Filter, Projection, QueryEngine, QuerySpec, TextQuery, Top};

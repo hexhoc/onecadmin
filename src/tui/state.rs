@@ -9,13 +9,14 @@ use zeroize::Zeroize;
 use crate::application::{
     AppError, ClusterAddRequest, ClusterRemovePlan, ClusterStatus, CredentialOverrideAddRequest,
     CredentialOverrideRemoveRequest, CredentialOverrideSelector, DiagnosticsSnapshot,
-    PreparedConnectionKill, PreparedSessionKill, RacOptions,
+    PreparedConnectionKill, PreparedProcessKill, PreparedSessionKill, RacOptions,
 };
 use crate::domain::{
     AuthConfig, AuthMode, ClusterAlias, ClusterTarget, ClusterUuid, ConnectionRecord,
     ConnectionUuid, FieldAccess, FieldRegistry, FieldValueRef, InfobaseAuthOverride,
-    InfobaseRecord, InfobaseUuid, QueryOutcome, QuerySpec, RacPolicy, RasEndpoint, RecordKind,
-    SecretString, SessionRecord, SessionUuid, TargetError, TargetErrorKind,
+    InfobaseRecord, InfobaseUuid, ProcessRecord, ProcessUuid, QueryOutcome, QuerySpec, RacPolicy,
+    RasEndpoint, RecordKind, SecretString, SessionRecord, SessionUuid, TargetError,
+    TargetErrorKind,
 };
 
 use super::{REFRESH_INTERVAL_PRESETS, TuiOptions, validate_refresh_interval};
@@ -27,16 +28,18 @@ pub enum Screen {
     Infobases,
     Sessions,
     Connections,
+    Processes,
     Diagnostics,
 }
 
 impl Screen {
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::Clusters,
         Self::Credentials,
         Self::Infobases,
         Self::Sessions,
         Self::Connections,
+        Self::Processes,
         Self::Diagnostics,
     ];
 
@@ -47,6 +50,7 @@ impl Screen {
             Self::Infobases => "Информационные базы",
             Self::Sessions => "Сеансы",
             Self::Connections => "Соединения",
+            Self::Processes => "Процессы",
             Self::Diagnostics => "Диагностика",
         }
     }
@@ -58,7 +62,8 @@ impl Screen {
             Self::Infobases => 2,
             Self::Sessions => 3,
             Self::Connections => 4,
-            Self::Diagnostics => 5,
+            Self::Processes => 5,
+            Self::Diagnostics => 6,
         }
     }
 
@@ -73,6 +78,7 @@ impl Screen {
             Self::Infobases => Some(RecordKind::Infobase),
             Self::Sessions => Some(RecordKind::Session),
             Self::Connections => Some(RecordKind::Connection),
+            Self::Processes => Some(RecordKind::Process),
             Self::Clusters | Self::Credentials | Self::Diagnostics => None,
         }
     }
@@ -227,6 +233,7 @@ pub(crate) enum RowKey {
     Infobase(Uuid, Uuid),
     Session(Uuid, Uuid),
     Connection(Uuid, Uuid),
+    Process(Uuid, Uuid),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -441,11 +448,19 @@ pub(crate) struct ConnectionSelection {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct ProcessSelection {
+    pub cluster: String,
+    pub cluster_uuid: ClusterUuid,
+    pub process: ProcessUuid,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) enum ConfirmAction {
     RemoveCluster(Box<ClusterRemovePlan>),
     RemoveCredential(CredentialOverrideRemoveRequest),
     KillSessions(Vec<PreparedSessionKill>),
     KillConnections(Vec<PreparedConnectionKill>),
+    KillProcesses(Vec<PreparedProcessKill>),
 }
 
 #[derive(Clone, Debug)]
@@ -459,6 +474,8 @@ pub(crate) enum OperationRequest {
     KillSessions(Vec<PreparedSessionKill>),
     PrepareConnectionKill(Vec<ConnectionSelection>),
     KillConnections(Vec<PreparedConnectionKill>),
+    PrepareProcessKill(Vec<ProcessSelection>),
+    KillProcesses(Vec<PreparedProcessKill>),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -475,12 +492,14 @@ pub(crate) enum OperationResult {
     ClusterRemovePrepared(Box<ClusterRemovePlan>),
     SessionKillPrepared(Vec<PreparedSessionKill>),
     ConnectionKillPrepared(Vec<PreparedConnectionKill>),
+    ProcessKillPrepared(Vec<PreparedProcessKill>),
     ClusterAdded(String),
     ClusterRemoved(String),
     CredentialAdded(String),
     CredentialRemoved(String),
     SessionsKilled(ActionReport),
     ConnectionsKilled(ActionReport),
+    ProcessesKilled(ActionReport),
 }
 
 #[derive(Clone, Debug)]
@@ -500,6 +519,10 @@ pub(crate) enum RefreshWork {
         cluster: Option<String>,
     },
     Connections {
+        query: QuerySpec,
+        cluster: Option<String>,
+    },
+    Processes {
         query: QuerySpec,
         cluster: Option<String>,
     },
@@ -532,6 +555,7 @@ pub(crate) enum BackgroundPayload {
     Infobases(Result<QueryOutcome<InfobaseRecord>, TaskFailure>),
     Sessions(Result<QueryOutcome<SessionRecord>, TaskFailure>),
     Connections(Result<QueryOutcome<ConnectionRecord>, TaskFailure>),
+    Processes(Result<QueryOutcome<ProcessRecord>, TaskFailure>),
     Diagnostics(Result<DiagnosticsSnapshot, TaskFailure>),
     Operation(Box<Result<OperationResult, TaskFailure>>),
 }
@@ -799,6 +823,7 @@ pub(crate) struct App {
     pub infobases: TableScreen<QueryOutcome<InfobaseRecord>>,
     pub sessions: TableScreen<QueryOutcome<SessionRecord>>,
     pub connections: TableScreen<QueryOutcome<ConnectionRecord>>,
+    pub processes: TableScreen<QueryOutcome<ProcessRecord>>,
     pub diagnostics: DiagnosticsScreen,
     pub auto_refresh: AutoRefresh,
     pub modal: Option<Modal>,
@@ -821,6 +846,7 @@ impl App {
             infobases: TableScreen::new(),
             sessions: TableScreen::new(),
             connections: TableScreen::new(),
+            processes: TableScreen::new(),
             diagnostics: DiagnosticsScreen {
                 resource: Resource::new(),
                 scroll: 0,
@@ -881,6 +907,13 @@ impl App {
                     .build(RecordKind::Connection, &self.registry)?,
                 cluster: self.connections.settings.cluster_filter.clone(),
             },
+            Screen::Processes => RefreshWork::Processes {
+                query: self
+                    .processes
+                    .settings
+                    .build(RecordKind::Process, &self.registry)?,
+                cluster: self.processes.settings.cluster_filter.clone(),
+            },
             Screen::Diagnostics => RefreshWork::Diagnostics,
         };
         let request_id = self.allocate_request_id();
@@ -890,6 +923,7 @@ impl App {
             Screen::Infobases => self.infobases.resource.begin(request_id),
             Screen::Sessions => self.sessions.resource.begin(request_id),
             Screen::Connections => self.connections.resource.begin(request_id),
+            Screen::Processes => self.processes.resource.begin(request_id),
             Screen::Diagnostics => self.diagnostics.resource.begin(request_id),
         };
         let Some(generation) = generation else {
@@ -976,6 +1010,7 @@ impl App {
             BackgroundPayload::Infobases(result) => self.apply_infobases(meta, result),
             BackgroundPayload::Sessions(result) => self.apply_sessions(meta, result),
             BackgroundPayload::Connections(result) => self.apply_connections(meta, result),
+            BackgroundPayload::Processes(result) => self.apply_processes(meta, result),
             BackgroundPayload::Diagnostics(result) => self.apply_diagnostics(meta, result),
             BackgroundPayload::Operation(result) => {
                 self.apply_operation(message.request_id, *result)
@@ -1096,6 +1131,29 @@ impl App {
         self.finished_refresh_intents(Screen::Connections, true)
     }
 
+    fn apply_processes(
+        &mut self,
+        meta: RefreshMeta,
+        result: Result<QueryOutcome<ProcessRecord>, TaskFailure>,
+    ) -> Vec<Intent> {
+        if meta.screen != Screen::Processes || !self.processes.resource.finish(meta) {
+            return Vec::new();
+        }
+        match result {
+            Ok(data) => {
+                let old = process_keys_from_state(&self.processes.resource.state);
+                let new = data.data.iter().map(process_key).collect::<Vec<_>>();
+                self.processes.nav.preserve(&old, &new);
+                let count = data.data.len();
+                let errors = data.errors.len();
+                self.processes.resource.state = LoadState::Data(data);
+                self.set_loaded_status_for(Screen::Processes, count, errors);
+            }
+            Err(failure) => self.apply_refresh_failure(Screen::Processes, failure),
+        }
+        self.finished_refresh_intents(Screen::Processes, true)
+    }
+
     fn apply_diagnostics(
         &mut self,
         meta: RefreshMeta,
@@ -1164,6 +1222,12 @@ impl App {
                     &self.connections.resource.state,
                 ));
                 self.connections.resource.state = LoadState::Error(failure);
+            }
+            Screen::Processes => {
+                self.processes
+                    .nav
+                    .remember(&process_keys_from_state(&self.processes.resource.state));
+                self.processes.resource.state = LoadState::Error(failure);
             }
             Screen::Diagnostics => self.diagnostics.resource.state = LoadState::Error(failure),
         }
@@ -1271,6 +1335,34 @@ impl App {
                 self.status_is_error = false;
                 Vec::new()
             }
+            Ok(OperationResult::ProcessKillPrepared(prepared)) => {
+                let mut lines = vec![format!("Точных планов: {}", prepared.len())];
+                for item in &prepared {
+                    lines.push(format!("snapshot_id: {}", item.plan.snapshot_id()));
+                    for record in &item.records {
+                        lines.push(format!(
+                            "{} | process={} | pid={} | started_at={}",
+                            record.source.cluster,
+                            record.process,
+                            option_i64(record.pid),
+                            record
+                                .started_at
+                                .as_ref()
+                                .map(ToString::to_string)
+                                .unwrap_or_default()
+                        ));
+                    }
+                }
+                self.modal = Some(Modal::Confirm(Box::new(ConfirmModal {
+                    title: "Выключить выбранные рабочие процессы?".to_owned(),
+                    lines,
+                    action: ConfirmAction::KillProcesses(prepared),
+                    scroll: 0,
+                })));
+                self.status = "Точные планы выключения подготовлены".to_owned();
+                self.status_is_error = false;
+                Vec::new()
+            }
             Ok(OperationResult::ClusterAdded(alias)) => {
                 self.finish_mutation(format!("Кластер `{alias}` добавлен"));
                 vec![
@@ -1305,6 +1397,13 @@ impl App {
                 self.finish_action_report("Разрыв соединений", &report);
                 vec![
                     Intent::Refresh(Screen::Connections),
+                    Intent::Refresh(Screen::Diagnostics),
+                ]
+            }
+            Ok(OperationResult::ProcessesKilled(report)) => {
+                self.finish_action_report("Выключение процессов", &report);
+                vec![
+                    Intent::Refresh(Screen::Processes),
                     Intent::Refresh(Screen::Diagnostics),
                 ]
             }
@@ -1458,7 +1557,7 @@ impl App {
                 }));
                 Vec::new()
             }
-            KeyCode::Char(value @ '1'..='6') => {
+            KeyCode::Char(value @ '1'..='7') => {
                 let index = value as usize - '1' as usize;
                 self.screen = Screen::ALL[index];
                 self.initial_refresh_intent()
@@ -1518,6 +1617,10 @@ impl App {
                         ConfirmAction::KillConnections(prepared) => (
                             "Разрыв выбранных соединений...".to_owned(),
                             OperationRequest::KillConnections(prepared),
+                        ),
+                        ConfirmAction::KillProcesses(prepared) => (
+                            "Выключение выбранных процессов...".to_owned(),
+                            OperationRequest::KillProcesses(prepared),
                         ),
                     };
                     self.begin_operation(title, request)
@@ -1710,6 +1813,7 @@ impl App {
             Screen::Infobases => &self.infobases.settings,
             Screen::Sessions => &self.sessions.settings,
             Screen::Connections => &self.connections.settings,
+            Screen::Processes => &self.processes.settings,
             Screen::Diagnostics => &self.clusters.settings,
         }
     }
@@ -1721,6 +1825,7 @@ impl App {
             Screen::Infobases => &mut self.infobases.settings,
             Screen::Sessions => &mut self.sessions.settings,
             Screen::Connections => &mut self.connections.settings,
+            Screen::Processes => &mut self.processes.settings,
             Screen::Diagnostics => &mut self.clusters.settings,
         }
     }
@@ -1796,6 +1901,7 @@ impl App {
             Screen::Infobases => self.infobases.resource.needs_initial_load(),
             Screen::Sessions => self.sessions.resource.needs_initial_load(),
             Screen::Connections => self.connections.resource.needs_initial_load(),
+            Screen::Processes => self.processes.resource.needs_initial_load(),
             Screen::Diagnostics => self.diagnostics.resource.needs_initial_load(),
         };
         if needed {
@@ -1829,6 +1935,7 @@ impl App {
             Screen::Infobases => self.infobases.resource.is_active(),
             Screen::Sessions => self.sessions.resource.is_active(),
             Screen::Connections => self.connections.resource.is_active(),
+            Screen::Processes => self.processes.resource.is_active(),
             Screen::Diagnostics => self.diagnostics.resource.is_active(),
         }
     }
@@ -1853,6 +1960,7 @@ impl App {
             Screen::Infobases => outcome_len(&self.infobases.resource.state),
             Screen::Sessions => outcome_len(&self.sessions.resource.state),
             Screen::Connections => outcome_len(&self.connections.resource.state),
+            Screen::Processes => outcome_len(&self.processes.resource.state),
             Screen::Diagnostics => 0,
         }
     }
@@ -1902,6 +2010,7 @@ impl App {
             Screen::Infobases => &mut self.infobases.nav,
             Screen::Sessions => &mut self.sessions.nav,
             Screen::Connections => &mut self.connections.nav,
+            Screen::Processes => &mut self.processes.nav,
             Screen::Diagnostics => &mut self.clusters.nav,
         }
     }
@@ -1910,10 +2019,12 @@ impl App {
         let key = match self.screen {
             Screen::Sessions => selected_session(&self.sessions).map(session_key),
             Screen::Connections => selected_connection(&self.connections).map(connection_key),
+            Screen::Processes => selected_process(&self.processes).map(process_key),
             _ => None,
         };
         let Some(key) = key else {
-            self.status = "Множественный выбор доступен для сеансов и соединений".to_owned();
+            self.status =
+                "Множественный выбор доступен для сеансов, соединений и процессов".to_owned();
             self.status_is_error = false;
             return;
         };
@@ -1932,6 +2043,8 @@ impl App {
                 .map(|record| record_details(record, RecordKind::Session, &self.registry)),
             Screen::Connections => selected_connection(&self.connections)
                 .map(|record| record_details(record, RecordKind::Connection, &self.registry)),
+            Screen::Processes => selected_process(&self.processes)
+                .map(|record| record_details(record, RecordKind::Process, &self.registry)),
             Screen::Diagnostics => None,
         };
         if let Some(lines) = details {
@@ -2037,9 +2150,21 @@ impl App {
                     OperationRequest::PrepareConnectionKill(selections),
                 )
             }
+            Screen::Processes => {
+                let selections = selected_process_identities(&self.processes);
+                if selections.is_empty() {
+                    self.set_status_error("Не выбран ни один процесс".to_owned());
+                    return Vec::new();
+                }
+                self.begin_operation(
+                    "Подготовка точных планов выключения...",
+                    OperationRequest::PrepareProcessKill(selections),
+                )
+            }
             _ => {
                 self.set_status_error(
-                    "Опасное действие доступно только для сеансов и соединений".to_owned(),
+                    "Опасное действие доступно только для сеансов, соединений и процессов"
+                        .to_owned(),
                 );
                 Vec::new()
             }
@@ -2078,6 +2203,7 @@ impl App {
         match self.screen {
             Screen::Sessions => self.sessions.nav.marked.len(),
             Screen::Connections => self.connections.nav.marked.len(),
+            Screen::Processes => self.processes.nav.marked.len(),
             _ => 0,
         }
     }
@@ -2178,6 +2304,13 @@ pub(crate) fn connection_key(record: &ConnectionRecord) -> RowKey {
     )
 }
 
+pub(crate) fn process_key(record: &ProcessRecord) -> RowKey {
+    RowKey::Process(
+        record.source.cluster_uuid.into_uuid(),
+        record.process.into_uuid(),
+    )
+}
+
 fn cluster_keys_from_state(state: &LoadState<Vec<ClusterRow>>) -> Vec<RowKey> {
     match state {
         LoadState::Data(data) => data.iter().map(cluster_key).collect(),
@@ -2209,6 +2342,13 @@ fn session_keys_from_state(state: &LoadState<QueryOutcome<SessionRecord>>) -> Ve
 fn connection_keys_from_state(state: &LoadState<QueryOutcome<ConnectionRecord>>) -> Vec<RowKey> {
     match state {
         LoadState::Data(data) => data.data.iter().map(connection_key).collect(),
+        LoadState::Loading | LoadState::Error(_) => Vec::new(),
+    }
+}
+
+fn process_keys_from_state(state: &LoadState<QueryOutcome<ProcessRecord>>) -> Vec<RowKey> {
+    match state {
+        LoadState::Data(data) => data.data.iter().map(process_key).collect(),
         LoadState::Loading | LoadState::Error(_) => Vec::new(),
     }
 }
@@ -2250,6 +2390,15 @@ fn selected_session(screen: &TableScreen<QueryOutcome<SessionRecord>>) -> Option
 fn selected_connection(
     screen: &TableScreen<QueryOutcome<ConnectionRecord>>,
 ) -> Option<&ConnectionRecord> {
+    match &screen.resource.state {
+        LoadState::Data(data) => screen
+            .selected_index()
+            .and_then(|index| data.data.get(index)),
+        LoadState::Loading | LoadState::Error(_) => None,
+    }
+}
+
+fn selected_process(screen: &TableScreen<QueryOutcome<ProcessRecord>>) -> Option<&ProcessRecord> {
     match &screen.resource.state {
         LoadState::Data(data) => screen
             .selected_index()
@@ -2310,6 +2459,31 @@ fn selected_connection_identities(
             cluster: record.source.cluster.to_string(),
             cluster_uuid: record.source.cluster_uuid,
             connection: record.connection,
+        })
+        .collect()
+}
+
+fn selected_process_identities(
+    screen: &TableScreen<QueryOutcome<ProcessRecord>>,
+) -> Vec<ProcessSelection> {
+    let LoadState::Data(outcome) = &screen.resource.state else {
+        return Vec::new();
+    };
+    outcome
+        .data
+        .iter()
+        .enumerate()
+        .filter(|(index, record)| {
+            if screen.nav.marked.is_empty() {
+                screen.nav.selected == Some(*index)
+            } else {
+                screen.nav.marked.contains(&process_key(record))
+            }
+        })
+        .map(|(_, record)| ProcessSelection {
+            cluster: record.source.cluster.to_string(),
+            cluster_uuid: record.source.cluster_uuid,
+            process: record.process,
         })
         .collect()
 }
@@ -2461,14 +2635,14 @@ fn option_i64(value: Option<i64>) -> String {
 fn help_lines() -> Vec<String> {
     [
         "Tab / Shift+Tab / ← →: сменить раздел",
-        "1..6: открыть раздел",
+        "1..7: открыть раздел",
         "↑ ↓ PgUp PgDn Home End: навигация",
         "Enter: все известные canonical fields и extra",
         "F5: ручное обновление (overlap не допускается)",
         "a: автообновление; [ ]: интервалы 5/10/30/60 с; i: свой интервал",
         "/: query; f: filter; s: sort; c: columns",
         "g: фильтр по кластеру (выпадающий список)",
-        "Space: отметить несколько сеансов/соединений",
+        "Space: отметить несколько сеансов/соединений/процессов",
         "k: подготовить точные планы и запросить подтверждение kill",
         "n: добавить кластер/credential override; Delete/x: удалить",
         "F2 или ← → на auth_mode: none/password",

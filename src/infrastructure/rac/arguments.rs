@@ -227,6 +227,42 @@ impl RacArgumentBuilder {
         arguments.push_public(ras_address);
         arguments
     }
+
+    pub fn process_list(
+        &self,
+        ras_address: &str,
+        cluster_id: Uuid,
+        cluster_credentials: &RacCredentials,
+    ) -> RacArguments {
+        let mut arguments = command_prefix(["process", "list"]);
+        push_public_option(&mut arguments, "--cluster", cluster_id);
+        push_credentials(
+            &mut arguments,
+            CredentialScope::Cluster,
+            cluster_credentials,
+        );
+        arguments.push_public(ras_address);
+        arguments
+    }
+
+    pub fn process_turn_off(
+        &self,
+        ras_address: &str,
+        cluster_id: Uuid,
+        process_id: Uuid,
+        cluster_credentials: &RacCredentials,
+    ) -> RacArguments {
+        let mut arguments = command_prefix(["process", "turn-off"]);
+        push_public_option(&mut arguments, "--cluster", cluster_id);
+        push_public_option(&mut arguments, "--process", process_id);
+        push_credentials(
+            &mut arguments,
+            CredentialScope::Cluster,
+            cluster_credentials,
+        );
+        arguments.push_public(ras_address);
+        arguments
+    }
 }
 
 fn command<const N: usize>(parts: [&str; N], ras_address: &str) -> RacArguments {

@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use super::{
     ClusterAlias, ClusterUuid, ConnectionRecord, ConnectionUuid, DomainError, InfobaseUuid,
-    ProcessUuid, RasEndpoint, SessionRecord, SessionUuid,
+    ProcessRecord, ProcessUuid, RasEndpoint, SessionRecord, SessionUuid,
 };
 
 pub const DEFAULT_SESSION_KILL_MESSAGE: &str =
@@ -240,10 +240,87 @@ impl ConnectionKillPlan {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcessKillTarget {
+    pub cluster: ClusterAlias,
+    pub cluster_uuid: ClusterUuid,
+    pub ras_address: RasEndpoint,
+    pub process_id: ProcessUuid,
+}
+
+impl From<&ProcessRecord> for ProcessKillTarget {
+    fn from(record: &ProcessRecord) -> Self {
+        Self {
+            cluster: record.source.cluster.clone(),
+            cluster_uuid: record.source.cluster_uuid,
+            ras_address: record.source.ras_address.clone(),
+            process_id: record.process,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcessKillPlan {
+    snapshot_id: SnapshotId,
+    targets: Box<[ProcessKillTarget]>,
+}
+
+impl ProcessKillPlan {
+    pub fn new(
+        snapshot_id: SnapshotId,
+        targets: Vec<ProcessKillTarget>,
+    ) -> Result<Self, DomainError> {
+        if targets.is_empty() {
+            return Err(DomainError::EmptyKillPlan);
+        }
+        let mut identities = HashSet::with_capacity(targets.len());
+        if targets
+            .iter()
+            .any(|target| !identities.insert((target.cluster_uuid, target.process_id)))
+        {
+            return Err(DomainError::DuplicateKillTarget);
+        }
+        Ok(Self {
+            snapshot_id,
+            targets: targets.into_boxed_slice(),
+        })
+    }
+
+    pub fn from_records(
+        snapshot_id: SnapshotId,
+        records: &[ProcessRecord],
+    ) -> Result<Self, DomainError> {
+        Self::new(
+            snapshot_id,
+            records.iter().map(ProcessKillTarget::from).collect(),
+        )
+    }
+
+    #[must_use]
+    pub const fn snapshot_id(&self) -> SnapshotId {
+        self.snapshot_id
+    }
+
+    #[must_use]
+    pub fn targets(&self) -> &[ProcessKillTarget] {
+        &self.targets
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.targets.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.targets.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{
-        ClusterSource, ConnectionRecord, ConnectionUuid, ProcessUuid, SessionRecord,
+        ClusterSource, ConnectionRecord, ConnectionUuid, ProcessRecord, ProcessUuid, SessionRecord,
     };
     use super::*;
 
@@ -315,5 +392,26 @@ mod tests {
                 field: "infobase_uuid"
             })
         ));
+    }
+
+    #[test]
+    fn process_plan_keeps_cluster_and_process_identity() {
+        let record = ProcessRecord::new(source(), ProcessUuid::new(Uuid::from_u128(2)));
+        let plan = ProcessKillPlan::from_records(SnapshotId::new(Uuid::from_u128(100)), &[record])
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        assert_eq!(plan.targets()[0].process_id.into_uuid().as_u128(), 2);
+        assert_eq!(plan.targets()[0].cluster_uuid.into_uuid().as_u128(), 1);
+    }
+
+    #[test]
+    fn process_plan_rejects_duplicates() {
+        let record = ProcessRecord::new(source(), ProcessUuid::new(Uuid::from_u128(2)));
+        let result = ProcessKillPlan::from_records(
+            SnapshotId::new(Uuid::from_u128(100)),
+            &[record.clone(), record],
+        );
+
+        assert_eq!(result, Err(DomainError::DuplicateKillTarget));
     }
 }

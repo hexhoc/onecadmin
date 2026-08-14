@@ -6,7 +6,8 @@ use uuid::Uuid;
 
 use crate::domain::{
     ClusterSource, ClusterUuid, ConnectionRecord, ConnectionUuid, DiscoveredCluster, ExtraFields,
-    FieldValue, InfobaseRecord, InfobaseUuid, ProcessUuid, SessionRecord, SessionUuid,
+    FieldValue, InfobaseRecord, InfobaseUuid, ProcessRecord, ProcessUuid, SessionRecord,
+    SessionUuid,
 };
 use crate::infrastructure::rac::RacRecord;
 
@@ -264,6 +265,21 @@ pub fn normalize_connection(
         &["session_number", "session_id"],
     );
     normalized.blocked_by_ls = optional_int(&mut reader, "blocked_by_ls", &["blocked_by_ls"]);
+    normalized.extra = reader.finish();
+    Ok(normalized)
+}
+
+pub fn normalize_process(
+    record: &RacRecord,
+    source: ClusterSource,
+) -> Result<ProcessRecord, NormalizationError> {
+    let mut reader = RecordReader::new(record);
+    reader.consume(&["cluster", "cluster_uuid", "cluster_id"]);
+    let process = required_uuid(&mut reader, "process", &["process", "process_uuid"])?;
+    let mut normalized = ProcessRecord::new(source, ProcessUuid::new(process));
+    normalized.server = optional_uuid(&mut reader, "server", &["server", "server_uuid"]);
+    normalized.pid = optional_int(&mut reader, "pid", &["pid"]);
+    normalized.started_at = optional_datetime(&mut reader, "started_at", &["started_at"]);
     normalized.extra = reader.finish();
     Ok(normalized)
 }
@@ -601,6 +617,56 @@ mod tests {
         assert_eq!(
             session.extra.get("rac_raw_cpu_time_total"),
             Some(&FieldValue::Str("future-format".to_owned()))
+        );
+    }
+
+    #[test]
+    fn connection_application_quotes_are_stripped() {
+        let mut record = RacRecord::new();
+        record.insert("connection", Uuid::from_u128(2).to_string());
+        record.insert("process", Uuid::from_u128(3).to_string());
+        record.insert("application", "\"1CV8\"");
+
+        let connection =
+            normalize_connection(&record, source()).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(connection.application.as_deref(), Some("1CV8"));
+    }
+
+    #[test]
+    fn process_record_keeps_identity_server_pid_and_unknown_fields() {
+        let mut record = RacRecord::new();
+        record.insert("process", Uuid::from_u128(2).to_string());
+        record.insert("server", Uuid::from_u128(3).to_string());
+        record.insert("pid", "1234");
+        record.insert("started-at", "2026-08-11T10:00:00+03:00");
+        record.insert("connections", "42");
+        record.insert("memory-size", "1048576");
+        record.insert("turned-on", "2026-08-10T09:00:00+03:00");
+        record.insert("running", "true");
+        record.insert("use", "normal");
+        record.insert("future-field", "preserved");
+
+        let process =
+            normalize_process(&record, source()).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(process.process.into_uuid().as_u128(), 2);
+        assert_eq!(process.server, Some(Uuid::from_u128(3)));
+        assert_eq!(process.pid, Some(1234));
+        assert!(process.started_at.is_some());
+        assert_eq!(
+            process.extra.get("connections"),
+            Some(&FieldValue::Str("42".to_owned()))
+        );
+        assert_eq!(
+            process.extra.get("memory_size"),
+            Some(&FieldValue::Str("1048576".to_owned()))
+        );
+        assert_eq!(
+            process.extra.get("turned_on"),
+            Some(&FieldValue::Str("2026-08-10T09:00:00+03:00".to_owned()))
+        );
+        assert_eq!(
+            process.extra.get("future_field"),
+            Some(&FieldValue::Str("preserved".to_owned()))
         );
     }
 }

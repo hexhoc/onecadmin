@@ -190,6 +190,12 @@ impl SortKey {
     }
 }
 
+const SOURCE_FIELDS: &[RecordKind] = &[
+    RecordKind::Infobase,
+    RecordKind::Session,
+    RecordKind::Connection,
+    RecordKind::Process,
+];
 const ALL_RECORDS: &[RecordKind] = &[
     RecordKind::Infobase,
     RecordKind::Session,
@@ -198,6 +204,7 @@ const ALL_RECORDS: &[RecordKind] = &[
 const INFOBASE_ONLY: &[RecordKind] = &[RecordKind::Infobase];
 const SESSION_ONLY: &[RecordKind] = &[RecordKind::Session];
 const CONNECTION_ONLY: &[RecordKind] = &[RecordKind::Connection];
+const PROCESS_ONLY: &[RecordKind] = &[RecordKind::Process];
 
 const STRING_OPERATORS: &[FilterOperator] =
     &[FilterOperator::Eq, FilterOperator::Ne, FilterOperator::Like];
@@ -235,10 +242,10 @@ macro_rules! field {
 }
 
 static FIELD_DEFINITIONS: &[FieldDefinition] = &[
-    field!("cluster", Str, ALL_RECORDS, STRING_OPERATORS),
-    field!("cluster_uuid", Uuid, ALL_RECORDS, EQUALITY_OPERATORS),
-    field!("cluster_name", Str, ALL_RECORDS, STRING_OPERATORS),
-    field!("ras_address", Str, ALL_RECORDS, STRING_OPERATORS),
+    field!("cluster", Str, SOURCE_FIELDS, STRING_OPERATORS),
+    field!("cluster_uuid", Uuid, SOURCE_FIELDS, EQUALITY_OPERATORS),
+    field!("cluster_name", Str, SOURCE_FIELDS, STRING_OPERATORS),
+    field!("ras_address", Str, SOURCE_FIELDS, STRING_OPERATORS),
     field!("infobase", Str, ALL_RECORDS, STRING_OPERATORS),
     field!("infobase_uuid", Uuid, ALL_RECORDS, EQUALITY_OPERATORS),
     field!("connection_string", Str, INFOBASE_ONLY, STRING_OPERATORS),
@@ -436,6 +443,10 @@ static FIELD_DEFINITIONS: &[FieldDefinition] = &[
     field!("connected_at", DateTime, CONNECTION_ONLY, ORDERED_OPERATORS),
     field!("session_number", Int, CONNECTION_ONLY, ORDERED_OPERATORS),
     field!("blocked_by_ls", Int, CONNECTION_ONLY, ORDERED_OPERATORS),
+    field!("process", Uuid, PROCESS_ONLY, EQUALITY_OPERATORS),
+    field!("server", Uuid, PROCESS_ONLY, EQUALITY_OPERATORS),
+    field!("pid", Int, PROCESS_ONLY, ORDERED_OPERATORS),
+    field!("started_at", DateTime, PROCESS_ONLY, ORDERED_OPERATORS),
 ];
 
 const INFOBASE_DEFAULT_COLUMNS: &[&str] = &[
@@ -444,7 +455,7 @@ const INFOBASE_DEFAULT_COLUMNS: &[&str] = &[
     "ras_address",
     "infobase",
     "infobase_uuid",
-    "connection_string",
+    "description",
 ];
 const SESSION_DEFAULT_COLUMNS: &[&str] = &[
     "cluster",
@@ -468,6 +479,17 @@ const CONNECTION_DEFAULT_COLUMNS: &[&str] = &[
     "session_number",
     "process",
 ];
+const PROCESS_DEFAULT_COLUMNS: &[&str] = &[
+    "cluster",
+    "ras_address",
+    "pid",
+    "started_at",
+    "connections",
+    "memory",
+    "on",
+    "running",
+    "use",
+];
 
 const INFOBASE_DEFAULT_SORT: &[SortKey] = &[
     SortKey::new("cluster", SortDirection::Asc, FieldType::Str),
@@ -483,6 +505,10 @@ const CONNECTION_DEFAULT_SORT: &[SortKey] = &[
     SortKey::new("cluster", SortDirection::Asc, FieldType::Str),
     SortKey::new("infobase", SortDirection::Asc, FieldType::Str),
     SortKey::new("conn_id", SortDirection::Asc, FieldType::Int),
+];
+const PROCESS_DEFAULT_SORT: &[SortKey] = &[
+    SortKey::new("cluster", SortDirection::Asc, FieldType::Str),
+    SortKey::new("pid", SortDirection::Asc, FieldType::Int),
 ];
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -533,6 +559,7 @@ impl FieldRegistry {
             RecordKind::Infobase => INFOBASE_DEFAULT_COLUMNS,
             RecordKind::Session => SESSION_DEFAULT_COLUMNS,
             RecordKind::Connection => CONNECTION_DEFAULT_COLUMNS,
+            RecordKind::Process => PROCESS_DEFAULT_COLUMNS,
         }
     }
 
@@ -542,6 +569,7 @@ impl FieldRegistry {
             RecordKind::Infobase => INFOBASE_DEFAULT_SORT,
             RecordKind::Session => SESSION_DEFAULT_SORT,
             RecordKind::Connection => CONNECTION_DEFAULT_SORT,
+            RecordKind::Process => PROCESS_DEFAULT_SORT,
         }
     }
 

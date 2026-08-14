@@ -1,6 +1,6 @@
 use crate::domain::{
-    ConnectionKillPlan, ConnectionKillTarget, ConnectionRecord, QueryOutcome, SessionKillPlan,
-    SessionKillTarget, SessionRecord, TargetError,
+    ConnectionKillPlan, ConnectionKillTarget, ConnectionRecord, ProcessKillPlan, ProcessKillTarget,
+    ProcessRecord, QueryOutcome, SessionKillPlan, SessionKillTarget, SessionRecord, TargetError,
 };
 
 use super::{AppError, AppExitCode, ExitCodePolicy, RacOptions};
@@ -199,6 +199,22 @@ impl PreparedConnectionKill {
 
 pub type SessionKillOutcome = ActionOutcome<SessionKillTarget>;
 pub type ConnectionKillOutcome = ActionOutcome<ConnectionKillTarget>;
+pub type ProcessKillOutcome = ActionOutcome<ProcessKillTarget>;
+
+#[derive(Clone, Debug)]
+pub struct PreparedProcessKill {
+    pub plan: ProcessKillPlan,
+    pub records: Vec<ProcessRecord>,
+    pub target_errors: Vec<TargetError>,
+    pub rac_options: RacOptions,
+}
+
+impl PreparedProcessKill {
+    #[must_use]
+    pub fn is_partial(&self) -> bool {
+        !self.target_errors.is_empty()
+    }
+}
 
 #[cfg(test)]
 mod tests {

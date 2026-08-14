@@ -10,6 +10,7 @@ mod infobases;
 mod normalize;
 mod outcome;
 mod ports;
+mod processes;
 #[cfg(test)]
 mod service_tests;
 mod sessions;
@@ -45,15 +46,17 @@ pub use error::{AppError, AppErrorCategory, AppExitCode, ExitCodePolicy};
 pub use infobases::InfobaseSearchRequest;
 pub use normalize::{
     NormalizationError, RacNormalizer, normalize_cluster, normalize_connection, normalize_infobase,
-    normalize_session,
+    normalize_process, normalize_session,
 };
 pub use outcome::{
     ActionError, ActionItemOutcome, ActionMeta, ActionOutcome, ActionStatus, Approval,
-    ConnectionKillOutcome, PreparedConnectionKill, PreparedSessionKill, SessionKillOutcome,
+    ConnectionKillOutcome, PreparedConnectionKill, PreparedProcessKill, PreparedSessionKill,
+    ProcessKillOutcome, SessionKillOutcome,
 };
 pub use ports::{
     ConfigRepository, ConfigStoreAdapter, PortError, PortErrorKind, RacPort, RawConfigSnapshot,
 };
+pub use processes::{ProcessKillRequest, ProcessListRequest};
 pub use sessions::{SessionKillRequest, SessionListRequest};
 
 #[derive(Clone, Debug)]

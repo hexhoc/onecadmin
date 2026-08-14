@@ -83,6 +83,7 @@ struct FakeRacState {
     failed_sessions: HashSet<Uuid>,
     terminated: Vec<Uuid>,
     disconnected: Vec<(Uuid, Uuid, RacAuthMode, Option<String>)>,
+    turned_off_processes: Vec<Uuid>,
 }
 
 #[derive(Clone, Default)]
@@ -205,6 +206,34 @@ impl RacPort for FakeRac {
             infobase_credentials.mode(),
             infobase_credentials.username().map(str::to_owned),
         ));
+        Ok(Vec::new())
+    }
+
+    async fn process_list(
+        &self,
+        _ras_address: &str,
+        _cluster_id: Uuid,
+        _cluster_credentials: &RacCredentials,
+        _search_policy: &SearchPolicy,
+        _cancellation: &CancellationToken,
+    ) -> Result<Vec<RacRecord>, RacError> {
+        let mut record = RacRecord::new();
+        record.insert("process", Uuid::from_u128(300).to_string());
+        record.insert("server", Uuid::from_u128(400).to_string());
+        record.insert("pid", "7");
+        Ok(vec![record])
+    }
+
+    async fn process_turn_off(
+        &self,
+        _ras_address: &str,
+        _cluster_id: Uuid,
+        process_id: Uuid,
+        _cluster_credentials: &RacCredentials,
+        _search_policy: &SearchPolicy,
+        _cancellation: &CancellationToken,
+    ) -> Result<Vec<RacRecord>, RacError> {
+        self.state().turned_off_processes.push(process_id);
         Ok(Vec::new())
     }
 
@@ -453,4 +482,45 @@ async fn connection_kill_keeps_pair_and_uses_matching_infobase_credentials() {
             Some("ib-admin".to_owned())
         )]
     );
+}
+
+#[tokio::test]
+async fn process_list_and_turn_off_uses_cluster_credentials() {
+    let cluster_uuid = Uuid::from_u128(1);
+    let snapshot = raw_snapshot(&[("dev", "good.local", cluster_uuid)], false);
+    let rac = FakeRac::default();
+    rac.state()
+        .clusters
+        .insert("good.local:1545".to_owned(), cluster_uuid);
+    let app = services(snapshot, rac.clone(), Arc::new(AtomicUsize::new(0)));
+
+    let outcome = app
+        .list_processes(&ProcessListRequest::default(), &CancellationToken::new())
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(outcome.data.len(), 1);
+    assert_eq!(
+        outcome.data[0].process,
+        ProcessUuid::new(Uuid::from_u128(300))
+    );
+
+    let prepared = app
+        .prepare_process_kill(
+            &ProcessKillRequest {
+                selection: ProcessListRequest {
+                    id: Some(ProcessUuid::new(Uuid::from_u128(300))),
+                    ..ProcessListRequest::default()
+                },
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let outcome = app
+        .execute_prepared_process_kill(&prepared, Approval::Confirmed, &CancellationToken::new())
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    assert_eq!(outcome.meta.succeeded, 1);
+    assert_eq!(rac.state().turned_off_processes, vec![Uuid::from_u128(300)]);
 }

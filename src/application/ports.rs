@@ -306,6 +306,25 @@ pub trait RacPort: Send + Sync {
         cancellation: &CancellationToken,
     ) -> Result<Vec<RacRecord>, RacError>;
 
+    async fn process_list(
+        &self,
+        ras_address: &str,
+        cluster_id: Uuid,
+        cluster_credentials: &RacCredentials,
+        search_policy: &SearchPolicy,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<RacRecord>, RacError>;
+
+    async fn process_turn_off(
+        &self,
+        ras_address: &str,
+        cluster_id: Uuid,
+        process_id: Uuid,
+        cluster_credentials: &RacCredentials,
+        search_policy: &SearchPolicy,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<RacRecord>, RacError>;
+
     async fn chosen_candidate(&self, ras_address: &str) -> Option<RacCandidate>;
 }
 
@@ -438,6 +457,46 @@ impl RacPort for RacGateway {
             connection_id,
             cluster_credentials,
             infobase_credentials,
+            search_policy,
+            cancellation,
+        )
+        .await
+    }
+
+    async fn process_list(
+        &self,
+        ras_address: &str,
+        cluster_id: Uuid,
+        cluster_credentials: &RacCredentials,
+        search_policy: &SearchPolicy,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<RacRecord>, RacError> {
+        RacGateway::process_list(
+            self,
+            ras_address,
+            cluster_id,
+            cluster_credentials,
+            search_policy,
+            cancellation,
+        )
+        .await
+    }
+
+    async fn process_turn_off(
+        &self,
+        ras_address: &str,
+        cluster_id: Uuid,
+        process_id: Uuid,
+        cluster_credentials: &RacCredentials,
+        search_policy: &SearchPolicy,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<RacRecord>, RacError> {
+        RacGateway::process_turn_off(
+            self,
+            ras_address,
+            cluster_id,
+            process_id,
+            cluster_credentials,
             search_policy,
             cancellation,
         )

@@ -12,6 +12,7 @@ pub enum RecordKind {
     Infobase,
     Session,
     Connection,
+    Process,
 }
 
 impl RecordKind {
@@ -21,6 +22,7 @@ impl RecordKind {
             Self::Infobase => "infobase",
             Self::Session => "session",
             Self::Connection => "connection",
+            Self::Process => "process",
         }
     }
 }
@@ -309,7 +311,7 @@ impl FieldAccess for InfobaseRecord {
                 "connection_string" => Some(FieldValueRef::Str(&self.connection_string)),
                 _ => None,
             })
-            .or_else(|| extra_field(&self.extra, name))
+            .or_else(|| infobase_extra_field(&self.extra, name))
     }
 
     fn extra_fields(&self) -> &ExtraFields {
@@ -571,6 +573,64 @@ impl FieldAccess for ConnectionRecord {
     fn extra_fields(&self) -> &ExtraFields {
         &self.extra
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcessRecord {
+    pub source: ClusterSource,
+    pub process: ProcessUuid,
+    pub server: Option<uuid::Uuid>,
+    pub pid: Option<i64>,
+    pub started_at: Option<DateTime<FixedOffset>>,
+    pub extra: ExtraFields,
+}
+
+impl ProcessRecord {
+    #[must_use]
+    pub fn new(source: ClusterSource, process: ProcessUuid) -> Self {
+        Self {
+            source,
+            process,
+            server: None,
+            pid: None,
+            started_at: None,
+            extra: ExtraFields::new(),
+        }
+    }
+}
+
+impl FieldAccess for ProcessRecord {
+    fn record_kind(&self) -> RecordKind {
+        RecordKind::Process
+    }
+
+    fn field(&self, name: &str) -> Option<FieldValueRef<'_>> {
+        source_field(&self.source, name)
+            .or_else(|| {
+                Some(match name {
+                    "process" => FieldValueRef::Uuid(self.process.as_uuid()),
+                    "server" => optional_uuid(self.server.as_ref()),
+                    "pid" => optional_int(self.pid),
+                    "started_at" => optional_datetime(self.started_at.as_ref()),
+                    _ => return None,
+                })
+            })
+            .or_else(|| process_extra_field(&self.extra, name))
+    }
+
+    fn extra_fields(&self) -> &ExtraFields {
+        &self.extra
+    }
+}
+
+/// Maps table column aliases to the raw RAC extra fields they display.
+fn process_extra_field<'a>(extra: &'a ExtraFields, name: &str) -> Option<FieldValueRef<'a>> {
+    let key = match name {
+        "memory" => "memory_size",
+        "on" => "turned_on",
+        other => other,
+    };
+    extra.get(key).map(FieldValue::as_ref)
 }
 
 fn source_field<'a>(source: &'a ClusterSource, name: &str) -> Option<FieldValueRef<'a>> {

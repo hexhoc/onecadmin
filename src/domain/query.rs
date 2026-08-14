@@ -217,6 +217,7 @@ impl TextQuery {
             RecordKind::Infobase => &["infobase"],
             RecordKind::Session => &["user_name", "host"],
             RecordKind::Connection => &["host", "application"],
+            RecordKind::Process => &[],
         };
         Self::new(kind, input, fields.iter().copied(), registry)
     }

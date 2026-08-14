@@ -3,14 +3,15 @@ use tokio_util::sync::CancellationToken;
 
 use crate::application::{
     AppServices, Approval, ClusterSelector, ConnectionKillRequest, ConnectionListRequest,
-    InfobaseSearchRequest, SessionKillRequest, SessionListRequest,
+    InfobaseSearchRequest, ProcessKillRequest, ProcessListRequest, SessionKillRequest,
+    SessionListRequest,
 };
 use crate::domain::AuthMode;
 
 use super::state::{
     ActionReport, BackgroundMessage, BackgroundPayload, ClusterRow, ConnectionSelection,
-    CredentialRow, Job, JobKind, OperationRequest, OperationResult, RefreshWork, SessionSelection,
-    TaskFailure,
+    CredentialRow, Job, JobKind, OperationRequest, OperationResult, ProcessSelection, RefreshWork,
+    SessionSelection, TaskFailure,
 };
 
 pub(crate) fn spawn_job(
@@ -112,6 +113,25 @@ async fn run_refresh(
             BackgroundPayload::Connections(
                 services
                     .list_connections(&request, cancellation)
+                    .await
+                    .map_err(TaskFailure::from),
+            )
+        }
+        RefreshWork::Processes { query, cluster } => {
+            let request = match ClusterSelector::parse(cluster.as_deref()) {
+                Ok(clusters) => ProcessListRequest {
+                    clusters,
+                    query: Some(query),
+                    rac_options: rac_options.clone(),
+                    ..ProcessListRequest::default()
+                },
+                Err(error) => {
+                    return BackgroundPayload::Processes(Err(TaskFailure::from(error)));
+                }
+            };
+            BackgroundPayload::Processes(
+                services
+                    .list_processes(&request, cancellation)
                     .await
                     .map_err(TaskFailure::from),
             )
@@ -271,6 +291,16 @@ async fn run_operation(
             execute_connections(services, prepared, cancellation)
                 .await
                 .map(OperationResult::ConnectionsKilled)
+        }
+        OperationRequest::PrepareProcessKill(selections) => {
+            prepare_processes(services, selections, rac_options, cancellation)
+                .await
+                .map(OperationResult::ProcessKillPrepared)
+        }
+        OperationRequest::KillProcesses(prepared) => {
+            execute_processes(services, prepared, cancellation)
+                .await
+                .map(OperationResult::ProcessesKilled)
         }
     }
 }
@@ -437,6 +467,88 @@ async fn execute_connections(
                 report.errors.push(format!(
                     "{} connection={} {}: {}",
                     result.target.cluster, result.target.connection_id, error.code, error.message
+                ));
+            }
+        }
+    }
+    Ok(report)
+}
+
+async fn prepare_processes(
+    services: &AppServices,
+    selections: Vec<ProcessSelection>,
+    rac_options: &crate::application::RacOptions,
+    cancellation: &CancellationToken,
+) -> Result<Vec<crate::application::PreparedProcessKill>, TaskFailure> {
+    if selections.is_empty() {
+        return Err(TaskFailure::new(
+            "selector_required",
+            "Не выбран ни один точный UUID процесса",
+        ));
+    }
+    let mut prepared_items = Vec::with_capacity(selections.len());
+    for selected in selections {
+        if cancellation.is_cancelled() {
+            return Err(cancelled());
+        }
+        let selection = ProcessListRequest {
+            clusters: ClusterSelector::parse(Some(&selected.cluster)).map_err(TaskFailure::from)?,
+            id: Some(selected.process),
+            rac_options: rac_options.clone(),
+            ..ProcessListRequest::default()
+        };
+        let request = ProcessKillRequest { selection };
+        let prepared = services
+            .prepare_process_kill(&request, cancellation)
+            .await
+            .map_err(TaskFailure::from)?;
+        let valid = matches!(prepared.records.as_slice(), [record]
+            if record.source.cluster_uuid == selected.cluster_uuid
+                && record.process == selected.process)
+            && prepared.plan.len() == 1;
+        if !valid {
+            return Err(TaskFailure::new(
+                "selection_changed",
+                format!(
+                    "Подготовленный план не соответствует выбранному процессу {} в кластере {}",
+                    selected.process, selected.cluster
+                ),
+            ));
+        }
+        prepared_items.push(prepared);
+    }
+    Ok(prepared_items)
+}
+
+async fn execute_processes(
+    services: &AppServices,
+    prepared: Vec<crate::application::PreparedProcessKill>,
+    cancellation: &CancellationToken,
+) -> Result<ActionReport, TaskFailure> {
+    if prepared.is_empty() {
+        return Err(TaskFailure::new(
+            "empty_kill_plan",
+            "Нет подготовленных планов выключения процессов",
+        ));
+    }
+    let mut report = ActionReport::default();
+    for item in prepared {
+        if cancellation.is_cancelled() {
+            return Err(cancelled());
+        }
+        let outcome = services
+            .execute_prepared_process_kill(&item, Approval::Confirmed, cancellation)
+            .await
+            .map_err(TaskFailure::from)?;
+        report.attempted += outcome.meta.attempted;
+        report.succeeded += outcome.meta.succeeded;
+        report.failed += outcome.meta.failed;
+        report.cancelled += outcome.meta.cancelled;
+        for result in outcome.items {
+            if let Some(error) = result.error {
+                report.errors.push(format!(
+                    "{} process={} {}: {}",
+                    result.target.cluster, result.target.process_id, error.code, error.message
                 ));
             }
         }

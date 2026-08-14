@@ -9,19 +9,21 @@ pub use crate::application::AppExitCode;
 use crate::application::{
     ActionOutcome, ActionStatus, AppError, AppErrorCategory, AppServices, Approval,
     ClusterAddRequest, ClusterSelector, ConnectionKillOutcome, ConnectionKillRequest,
-    ConnectionListRequest, ExitCodePolicy, InfobaseSearchRequest, RacOptions, SessionKillOutcome,
-    SessionKillRequest, SessionListRequest,
+    ConnectionListRequest, ExitCodePolicy, InfobaseSearchRequest, ProcessKillOutcome,
+    ProcessKillRequest, ProcessListRequest, RacOptions, SessionKillOutcome, SessionKillRequest,
+    SessionListRequest,
 };
 use crate::domain::{
-    ConnectionKillTarget, FieldAccess, FieldRegistry, InfobaseAuthPolicy, Projection, QueryOutcome,
-    QuerySpec, RecordKind, SessionKillTarget, SqlMask, TargetError,
+    ConnectionKillTarget, FieldAccess, FieldRegistry, InfobaseAuthPolicy, ProcessKillTarget,
+    Projection, QueryOutcome, QuerySpec, RecordKind, SessionKillTarget, SqlMask, TargetError,
 };
 use crate::infrastructure::telemetry::SecretRedactor;
 
 use super::args::{
     Cli, CliCommand, ClusterAddArgs, ClusterCommand, ClusterRemoveArgs, ConnectionCommand,
     ConnectionKillArgs, ConnectionListArgs, InfobaseCommand, InfobaseSearchArgs, OutputFormat,
-    QueryOptions, SessionCommand, SessionKillArgs, SessionListArgs,
+    ProcessCommand, ProcessKillArgs, ProcessListArgs, QueryOptions, SessionCommand,
+    SessionKillArgs, SessionListArgs,
 };
 use super::confirm::{Confirmation, confirm};
 use super::output::{OutputError, OutputRenderer, RenderedOutput};
@@ -29,6 +31,7 @@ use super::output::{OutputError, OutputRenderer, RenderedOutput};
 const SESSION_PREVIEW_COLUMNS: &str = "cluster,infobase,session,session_id,user_name,host,app_id";
 const CONNECTION_PREVIEW_COLUMNS: &str =
     "cluster,infobase,connection,conn_id,host,application,process";
+const PROCESS_PREVIEW_COLUMNS: &str = "cluster,process,server,pid,started_at";
 
 /// Complete process-facing result of one CLI command.
 ///
@@ -247,6 +250,22 @@ where
             }
             ConnectionCommand::Kill(args) => {
                 run_connection_kill(
+                    cli,
+                    services,
+                    cancellation,
+                    redactor,
+                    args,
+                    request_confirmation,
+                )
+                .await
+            }
+        },
+        Some(CliCommand::Process { command }) => match command {
+            ProcessCommand::List(args) => {
+                run_process_list(cli, services, cancellation, redactor, args).await
+            }
+            ProcessCommand::Kill(args) => {
+                run_process_kill(
                     cli,
                     services,
                     cancellation,
@@ -507,6 +526,91 @@ where
     Ok(result)
 }
 
+async fn run_process_list(
+    cli: &Cli,
+    services: &AppServices,
+    cancellation: &CancellationToken,
+    redactor: &SecretRedactor,
+    args: &ProcessListArgs,
+) -> Result<CliRunResult, DispatchFailure> {
+    let (request, projection) = build_process_list_request(cli, services, args)?;
+    let mut outcome = services.list_processes(&request, cancellation).await?;
+    sanitize_target_errors(&mut outcome.errors, redactor);
+    render_query(cli, RecordKind::Process, &outcome, &projection).map_err(DispatchFailure::from)
+}
+
+async fn run_process_kill<F>(
+    cli: &Cli,
+    services: &AppServices,
+    cancellation: &CancellationToken,
+    redactor: &SecretRedactor,
+    args: &ProcessKillArgs,
+    request_confirmation: &mut F,
+) -> Result<CliRunResult, DispatchFailure>
+where
+    F: FnMut(&str, &str) -> io::Result<Confirmation>,
+{
+    let list_args = ProcessListArgs {
+        selectors: args.selectors.clone(),
+        query: args.query.clone(),
+    };
+    let (selection, _) = build_process_list_request(cli, services, &list_args)?;
+    let request = ProcessKillRequest { selection };
+    let mut prepared = services
+        .prepare_process_kill(&request, cancellation)
+        .await?;
+    sanitize_target_errors(&mut prepared.target_errors, redactor);
+
+    let projection = Projection::parse(
+        Some(PROCESS_PREVIEW_COLUMNS),
+        RecordKind::Process,
+        services.field_registry(),
+    )
+    .map_err(|error| {
+        AppError::internal(
+            "preview_projection_error",
+            format!("Не удалось построить проекцию предпросмотра процессов: {error}"),
+        )
+    })?;
+    let preview = render_preview(
+        cli,
+        RecordKind::Process,
+        &prepared.records,
+        &prepared.target_errors,
+        &projection,
+        "Выбрано процессов",
+    )?;
+    let prompt = format!(
+        "Выключить выбранные рабочие процессы ({})?",
+        prepared.plan.len()
+    );
+    let (approval, retain_preview) =
+        request_approval(args.force, &prompt, &preview, request_confirmation)?;
+    let stderr_prefix = if retain_preview { preview } else { Vec::new() };
+
+    let mut outcome = match services
+        .execute_prepared_process_kill(&prepared, approval, cancellation)
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => return Err(DispatchFailure::with_stderr(error, stderr_prefix)),
+    };
+    sanitize_action_outcome(&mut outcome, redactor);
+    let exit_code = action_exit_code(&outcome, &prepared.target_errors);
+    let mut result = match render_process_action(
+        cli.format,
+        &outcome,
+        &prepared.target_errors,
+        exit_code,
+        redactor,
+    ) {
+        Ok(result) => result,
+        Err(error) => return Err(DispatchFailure::output(error, stderr_prefix)),
+    };
+    result.prepend_stderr(stderr_prefix);
+    Ok(result)
+}
+
 fn build_infobase_request(
     cli: &Cli,
     services: &AppServices,
@@ -576,6 +680,29 @@ fn build_connection_list_request(
         host: optional_mask(args.selectors.host.as_deref())?,
         application: optional_mask(args.selectors.application.as_deref())?,
         process: args.selectors.process,
+        query: Some(query),
+        rac_options: rac_options(cli),
+    };
+    Ok((request, projection))
+}
+
+fn build_process_list_request(
+    cli: &Cli,
+    services: &AppServices,
+    args: &ProcessListArgs,
+) -> Result<(ProcessListRequest, Projection), AppError> {
+    let query = base_query_spec(
+        RecordKind::Process,
+        &args.query,
+        None,
+        services.field_registry(),
+    )?;
+    let projection = query.projection().clone();
+    let request = ProcessListRequest {
+        clusters: ClusterSelector::parse(args.selectors.cluster.as_deref())?,
+        id: args.selectors.id,
+        pid: args.selectors.pid,
+        server: args.selectors.server,
         query: Some(query),
         rac_options: rac_options(cli),
     };
@@ -1034,6 +1161,138 @@ fn push_connection_action_error(
         "infobase": target.infobase,
         "connection": target.connection_id,
         "conn_id": target.connection_number,
+        "process": target.process_id,
+        "stage": stage,
+        "code": code,
+        "message": message,
+    }));
+}
+
+fn render_process_action(
+    format: OutputFormat,
+    outcome: &ProcessKillOutcome,
+    target_errors: &[TargetError],
+    exit_code: AppExitCode,
+    redactor: &SecretRedactor,
+) -> Result<CliRunResult, OutputError> {
+    let data_headers = ["cluster", "ras_address", "process", "pid", "status"];
+    let error_headers = [
+        "cluster",
+        "ras_address",
+        "process",
+        "pid",
+        "stage",
+        "code",
+        "message",
+    ];
+    let mut data_rows = Vec::with_capacity(outcome.items.len());
+    let mut data_json = Vec::with_capacity(outcome.items.len());
+    let mut error_rows = Vec::new();
+    let mut error_json = Vec::new();
+
+    for item in &outcome.items {
+        let target = &item.target;
+        data_rows.push(vec![
+            target.cluster.to_string(),
+            target.ras_address.to_string(),
+            target.process_id.to_string(),
+            String::new(),
+            item.status.code().to_owned(),
+        ]);
+        data_json.push(json!({
+            "cluster": target.cluster,
+            "ras_address": target.ras_address,
+            "process": target.process_id,
+            "status": item.status.code(),
+        }));
+
+        if let Some(error) = &item.error {
+            push_process_action_error(
+                target,
+                "action",
+                &error.code,
+                &error.message,
+                redactor,
+                &mut error_rows,
+                &mut error_json,
+            );
+        } else if item.status != ActionStatus::Success {
+            push_process_action_error(
+                target,
+                "action",
+                "action_failed",
+                "Действие завершилось без диагностического сообщения",
+                redactor,
+                &mut error_rows,
+                &mut error_json,
+            );
+        }
+    }
+
+    for error in target_errors {
+        let message = redactor.redact(&error.message);
+        error_rows.push(vec![
+            error.cluster.to_string(),
+            error.ras_address.to_string(),
+            String::new(),
+            String::new(),
+            "selection".to_owned(),
+            error.code().to_owned(),
+            message.clone(),
+        ]);
+        error_json.push(json!({
+            "cluster": error.cluster,
+            "ras_address": error.ras_address,
+            "process": null,
+            "stage": "selection",
+            "code": error.code(),
+            "message": message,
+        }));
+    }
+
+    let partial = outcome.meta.partial || (!target_errors.is_empty() && outcome.meta.succeeded > 0);
+    render_action_output(
+        format,
+        &data_headers,
+        &data_rows,
+        data_json,
+        &error_headers,
+        &error_rows,
+        error_json,
+        json!({
+            "attempted": outcome.meta.attempted,
+            "succeeded": outcome.meta.succeeded,
+            "failed": outcome.meta.failed,
+            "cancelled": outcome.meta.cancelled,
+            "selection_failed": target_errors.len(),
+            "partial": partial,
+        }),
+        exit_code,
+    )
+}
+
+fn push_process_action_error(
+    target: &ProcessKillTarget,
+    stage: &'static str,
+    code: &str,
+    message: &str,
+    redactor: &SecretRedactor,
+    rows: &mut Vec<Vec<String>>,
+    values: &mut Vec<Value>,
+) {
+    let message = redactor.redact(message);
+    rows.push(vec![
+        target.cluster.to_string(),
+        target.ras_address.to_string(),
+        target.process_id.to_string(),
+        String::new(),
+        stage.to_owned(),
+        code.to_owned(),
+        message.clone(),
+    ]);
+    values.push(json!({
+        "cluster": target.cluster,
+        "ras_address": target.ras_address,
         "process": target.process_id,
         "stage": stage,
         "code": code,

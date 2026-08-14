@@ -174,6 +174,40 @@ impl RacGateway {
             .await
     }
 
+    pub async fn process_list(
+        &self,
+        ras_address: &str,
+        cluster_id: Uuid,
+        cluster_credentials: &RacCredentials,
+        search_policy: &SearchPolicy,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<RacRecord>, RacError> {
+        let arguments = self
+            .arguments
+            .process_list(ras_address, cluster_id, cluster_credentials);
+        self.execute(ras_address, search_policy, &arguments, cancellation)
+            .await
+    }
+
+    pub async fn process_turn_off(
+        &self,
+        ras_address: &str,
+        cluster_id: Uuid,
+        process_id: Uuid,
+        cluster_credentials: &RacCredentials,
+        search_policy: &SearchPolicy,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<RacRecord>, RacError> {
+        let arguments = self.arguments.process_turn_off(
+            ras_address,
+            cluster_id,
+            process_id,
+            cluster_credentials,
+        );
+        self.execute(ras_address, search_policy, &arguments, cancellation)
+            .await
+    }
+
     async fn execute(
         &self,
         ras_address: &str,

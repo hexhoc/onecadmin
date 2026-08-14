@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use clap::error::ErrorKind;
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use uuid::Uuid;
 
 use crate::domain::{
     AuthConfig, ClusterAlias, ConnectionUuid, DomainError, FieldRegistry, FieldValue, Filter,
@@ -143,6 +144,13 @@ impl Cli {
                     .map_err(CliValidationError::from),
                 ConnectionCommand::Kill(args) => args.validate(&registry),
             },
+            Some(CliCommand::Process { command }) => match command {
+                ProcessCommand::List(args) => args
+                    .query_spec(&registry)
+                    .map(|_| ())
+                    .map_err(CliValidationError::from),
+                ProcessCommand::Kill(args) => args.validate(&registry),
+            },
         }
     }
 
@@ -191,6 +199,14 @@ pub enum CliCommand {
     Connection {
         #[command(subcommand)]
         command: ConnectionCommand,
+    },
+    #[command(
+        about = "Просмотр и выключение рабочих процессов",
+        help_template = GROUP_HELP_TEMPLATE
+    )]
+    Process {
+        #[command(subcommand)]
+        command: ProcessCommand,
     },
 }
 
@@ -742,6 +758,124 @@ impl ConnectionKillArgs {
             return Err(CliValidationError::new(
                 "selector_required",
                 "Для разрыва соединений требуется хотя бы один предметный селектор; одного `--cluster` недостаточно",
+            ));
+        }
+        self.query_spec(registry)
+            .map(|_| ())
+            .map_err(CliValidationError::from)
+    }
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum ProcessCommand {
+    #[command(
+        about = "Получить список рабочих процессов",
+        help_template = COMMAND_HELP_TEMPLATE
+    )]
+    List(ProcessListArgs),
+    #[command(
+        about = "Выключить выбранные рабочие процессы",
+        help_template = COMMAND_HELP_TEMPLATE
+    )]
+    Kill(ProcessKillArgs),
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct ProcessSelectors {
+    #[arg(long, value_name = "PATTERN", help = "Alias или маска alias кластера")]
+    pub cluster: Option<String>,
+    #[arg(long, value_name = "UUID", help = "UUID рабочего процесса")]
+    pub id: Option<ProcessUuid>,
+    #[arg(long, value_name = "NUMBER", help = "Идентификатор процесса (pid)")]
+    pub pid: Option<i64>,
+    #[arg(long, value_name = "UUID", help = "UUID рабочего сервера")]
+    pub server: Option<Uuid>,
+}
+
+impl ProcessSelectors {
+    #[must_use]
+    pub fn has_selector(&self) -> bool {
+        self.id.is_some() || self.pid.is_some() || self.server.is_some()
+    }
+
+    fn apply(&self, spec: &mut QuerySpec, registry: &FieldRegistry) -> Result<(), DomainError> {
+        push_mask(
+            spec,
+            RecordKind::Process,
+            "cluster",
+            self.cluster.as_deref(),
+            registry,
+        )?;
+        push_scalar(
+            spec,
+            RecordKind::Process,
+            "process",
+            self.id.map(|value| FieldValue::Uuid(value.into_uuid())),
+            registry,
+        )?;
+        push_scalar(
+            spec,
+            RecordKind::Process,
+            "pid",
+            self.pid.map(FieldValue::Int),
+            registry,
+        )?;
+        push_scalar(
+            spec,
+            RecordKind::Process,
+            "server",
+            self.server.map(FieldValue::Uuid),
+            registry,
+        )
+    }
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct ProcessListArgs {
+    #[command(flatten)]
+    pub selectors: ProcessSelectors,
+    #[command(flatten)]
+    pub query: QueryOptions,
+}
+
+impl ProcessListArgs {
+    pub fn query_spec(&self, registry: &FieldRegistry) -> Result<QuerySpec, DomainError> {
+        let mut spec = self.query.query_spec(RecordKind::Process, None, registry)?;
+        self.selectors.apply(&mut spec, registry)?;
+        Ok(spec)
+    }
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct ProcessKillArgs {
+    #[command(flatten)]
+    pub selectors: ProcessSelectors,
+    #[command(flatten)]
+    pub query: QueryOptions,
+
+    #[arg(long, action = ArgAction::SetTrue, help = "Не запрашивать подтверждение")]
+    pub force: bool,
+}
+
+impl ProcessKillArgs {
+    #[must_use]
+    pub fn has_selector(&self) -> bool {
+        self.selectors.has_selector() || !self.query.filter.is_empty()
+    }
+
+    pub fn query_spec(&self, registry: &FieldRegistry) -> Result<QuerySpec, DomainError> {
+        let list = ProcessListArgs {
+            selectors: self.selectors.clone(),
+            query: self.query.clone(),
+        };
+        list.query_spec(registry)
+    }
+
+    pub fn validate(&self, registry: &FieldRegistry) -> Result<(), CliValidationError> {
+        if !self.has_selector() {
+            return Err(CliValidationError::new(
+                "selector_required",
+                "Для выключения процессов требуется хотя бы один предметный селектор; одного `--cluster` недостаточно",
             ));
         }
         self.query_spec(registry)

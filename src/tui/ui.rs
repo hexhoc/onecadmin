@@ -17,7 +17,7 @@ use super::state::{
     App, ClusterForm, ClusterPicker, ClusterRow, CredentialForm, CredentialRow, DetailsModal,
     FormAuthMode, LoadState, Modal, QuerySettings, RowKey, Screen, TableNav, TableScreen,
     TaskFailure, cluster_key, cluster_status_text, connection_key, credential_key, infobase_key,
-    session_key,
+    process_key, session_key,
 };
 
 const ACCENT: Color = Color::Rgb(90, 180, 210);
@@ -83,6 +83,16 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App) {
             connection_key,
             true,
         ),
+        Screen::Processes => render_records(
+            frame,
+            sections[2],
+            "Процессы",
+            &mut app.processes,
+            RecordKind::Process,
+            &registry,
+            process_key,
+            true,
+        ),
         Screen::Diagnostics => render_diagnostics(frame, sections[2], app),
     }
     render_status(frame, sections[3], app);
@@ -124,7 +134,8 @@ const fn selected_index(screen: Screen) -> usize {
         Screen::Infobases => 2,
         Screen::Sessions => 3,
         Screen::Connections => 4,
-        Screen::Diagnostics => 5,
+        Screen::Processes => 5,
+        Screen::Diagnostics => 6,
     }
 }
 
@@ -371,7 +382,7 @@ fn render_table<T, K, V>(
 fn column_constraint(header: &str) -> Constraint {
     if header.ends_with("uuid") || matches!(header, "session" | "connection" | "process") {
         Constraint::Length(36)
-    } else if header.ends_with("_at") {
+    } else if header.ends_with("_at") || header == "on" {
         Constraint::Length(21)
     } else if matches!(header, "connection_string" | "path" | "message") {
         Constraint::Length(32)
@@ -510,6 +521,7 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &App) {
         Screen::Credentials => "n добавить override · Del удалить",
         Screen::Sessions => "Space отметить · k завершить с планом",
         Screen::Connections => "Space отметить · k разорвать с планом",
+        Screen::Processes => "Space отметить · k выключить с планом",
         Screen::Infobases => "Enter детали/строка подключения",
         Screen::Diagnostics => "↑↓ прокрутка · F5 снимок",
     };
