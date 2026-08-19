@@ -1485,6 +1485,10 @@ impl App {
         }
         if !key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('m') | KeyCode::Char('M'))
+            && !matches!(
+                self.modal.as_ref(),
+                Some(Modal::Edit(_) | Modal::ClusterForm(_) | Modal::CredentialForm(_))
+            )
         {
             return self.toggle_mouse_capture();
         }
@@ -3129,6 +3133,23 @@ mod tests {
         let intents = app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
         assert!(!app.mouse_capture);
         assert!(matches!(intents.as_slice(), [Intent::ToggleMouseCapture]));
+    }
+
+    #[test]
+    fn m_is_entered_in_columns_editor_without_toggling_mouse_capture() {
+        let mut app = App::new(&options());
+        app.screen = Screen::Sessions;
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+
+        let intents = app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+
+        let Some(Modal::Edit(edit)) = app.modal.as_ref() else {
+            panic!("ожидался редактор колонок");
+        };
+        assert_eq!(edit.kind, EditKind::Columns);
+        assert_eq!(edit.value, "m");
+        assert!(app.mouse_capture);
+        assert!(intents.is_empty());
     }
 
     #[test]
