@@ -1,83 +1,253 @@
 # onecadmin
 
-`onecadmin` is a Windows terminal application for administering 1C:Enterprise clusters through an already running RAS service and the installed `rac.exe` utility.
+`onecadmin` - полноэкранный TUI и набор CLI-команд для администрирования
+кластеров 1С:Предприятия через уже запущенный RAS и установленный `rac.exe`.
+Интерфейс и сообщения приложения выводятся на русском языке, а команды CLI,
+параметры, канонические поля, ключи JSON и колонки CSV остаются английскими.
 
-The user interface and messages are in Russian. CLI commands, options, output fields, JSON keys and CSV columns are in English.
+Подробные требования находятся в [docs/specification.md](docs/specification.md).
 
-## Requirements
+## Требования
 
-- Windows 10 or Windows 11 x64.
-- 1C:Enterprise 8.3.20 or newer.
-- An already running RAS service with exactly one cluster.
-- `rac.exe` from an installed compatible 1C platform version.
+- Windows 10/11 x64.
+- Платформа 1С:Предприятие 8.3.20 или новее.
+- Запущенная и доступная служба RAS.
+- Один endpoint RAS должен возвращать ровно один кластер.
+- Для portable EXE отдельно установленный Python не требуется.
+- `rac.exe` не входит в поставку и автоматически ищется среди установленных
+  платформ 1С.
 
-`onecadmin` does not install or start RAS and does not include `rac.exe`.
+Приложение не устанавливает и не запускает `ras.exe`.
 
-## Build
+## Быстрый старт
 
-Install stable Rust and Visual Studio Build Tools with the C++ workload, then run:
+Добавление подключения с парольной аутентификацией:
 
 ```powershell
-cargo build --release --locked
+onecadmin cluster add `
+  --name dev `
+  --ras RV-DEV-1C01:1545 `
+  --auth password `
+  --user cluster_admin `
+  --password cluster_password
 ```
 
-The result is `target\release\onecadmin.exe`. The release profile and `.cargo\config.toml` produce a portable executable with a statically linked CRT. System Windows DLLs and the external `rac.exe` remain runtime requirements.
+Удаление настроенного подключения:
 
-## Configuration
-
-The default path is:
-
-```text
-%APPDATA%\onecadmin\config.yaml
+```powershell
+onecadmin cluster remove --name dev
 ```
 
-The path priority is `--config`, `ONECADMIN_CONFIG`, then the default path. The application creates an empty version 1 configuration when the selected file does not exist.
+Добавление общей учетной записи администратора информационных баз:
 
-## Password Warning
+```powershell
+onecadmin cluster add `
+  --name dev `
+  --ras RV-DEV-1C01:1545 `
+  --auth password `
+  --user cluster_admin `
+  --password cluster_password `
+  --infobase-auth password `
+  --infobase-user infobase_admin `
+  --infobase-password infobase_password
+```
 
-Passwords are stored in plain text in `config.yaml`. This is not encryption.
-
-Passwords passed to `onecadmin` and forwarded to `rac.exe` can be visible in PowerShell history and in the process list. Technical logs and JSON errors redact configured passwords, but operators must still protect the Windows account and configuration file.
-
-## Usage
-
-Running without a command opens the full-screen TUI:
+Запуск TUI:
 
 ```powershell
 onecadmin
 ```
 
-Add and remove a connection:
+Поиск баз:
 
 ```powershell
-onecadmin cluster add --name dev --ras RV-DEV-1C01:1545 --auth password --user admin --password secret
-onecadmin cluster remove --name dev
+onecadmin infobase search zup_corp
+onecadmin infobase search 'zup_corp%'
+onecadmin infobase search 'zup_corp%' --cluster 'prod%'
 ```
 
-Search and inspect:
+Поиск сеансов:
 
 ```powershell
-onecadmin infobase search 'zup%'
-onecadmin session list --infobase zup_corp --sort cpu_time_total:desc --top 10
-onecadmin connection list --query 'APP-%' --format json
+onecadmin session list --infobase zup_corp
+onecadmin session list --query 'DOMAIN\ivanov'
+onecadmin session list --query 'PC-%'
+onecadmin session list --top 10 --sort cpu_time_total:desc
 ```
 
-Destructive commands require a selector and confirmation. `--cluster` alone is not a selector. Use `--force` only in controlled non-interactive automation:
+Поиск соединений:
 
 ```powershell
-onecadmin session kill --user 'test%' --infobase zup_corp
-onecadmin connection kill --host 'APP-%' --force
+onecadmin connection list --infobase 'zup%'
+onecadmin connection list --query 'APP-SERVER%'
+onecadmin connection list --sort connected_at:desc
 ```
 
-## Runtime Files
+Завершение сеансов и разрыв соединений:
+
+```powershell
+onecadmin session kill --id 00000000-0000-0000-0000-000000000001
+onecadmin session kill --user 'test%' --infobase zup_corp --force
+onecadmin connection kill --id 00000000-0000-0000-0000-000000000002
+```
+
+Без `--force` опасная операция показывает выбранные объекты и запрашивает
+подтверждение. Операция без предметного селектора запрещена даже с `--force`;
+одного `--cluster` недостаточно.
+
+## Маски и фильтры
+
+Именованные строковые параметры используют SQL LIKE:
+
+- `%` - любое количество символов;
+- `_` - ровно один символ;
+- `\%` и `\_` - литеральные `%` и `_`.
+
+Без активных wildcard используется точное сравнение без учета регистра.
+
+Универсальный фильтр имеет формат `field:operator:value`:
+
+```powershell
+onecadmin session list --filter cpu_time_total:gt:100000
+onecadmin session list --filter app_id:like:1CV8%
+onecadmin session list `
+  --filter cpu_time_total:gt:100000 `
+  --filter app_id:like:1CV8%
+```
+
+Операторы: `eq`, `ne`, `like`, `gt`, `ge`, `lt`, `le`. Повторенные фильтры
+объединяются через AND. Список канонических полей приведен в
+[`docs/specification.md`](docs/specification.md); имена RAC нормализованы в
+snake_case. Короткий alias `cpu_time` намеренно отсутствует: используйте
+`cpu_time_total`, `cpu_time_current` или `cpu_time_last_5min`.
+
+## Форматы вывода
+
+```powershell
+onecadmin session list --format table
+onecadmin session list --format json
+onecadmin session list --format csv
+onecadmin session list --columns cluster,infobase,user_name,cpu_time_total
+onecadmin session list --columns '*'
+```
+
+Таблица форматирует размеры и длительности для чтения человеком. JSON и CSV
+сохраняют машинные значения, полные UUID и даты ISO 8601. Данные пишутся в
+stdout, диагностика - в stderr.
+
+## Конфигурация
+
+Путь по умолчанию:
+
+```text
+%APPDATA%\onecadmin\config.yaml
+```
+
+Если выбранного файла нет, приложение создает пустую конфигурацию версии 1.
+Другой файл можно выбрать глобальной опцией или переменной окружения:
+
+```powershell
+onecadmin --config D:\configs\onecadmin.yaml session list
+$env:ONECADMIN_CONFIG = 'D:\configs\onecadmin.yaml'
+```
+
+Явный RAC задается через `--rac-path`, `ONECADMIN_RAC_PATH`, настройку
+конкретного кластера или глобальный `settings.rac_path`. Затем проверяются
+`PATH`, реестр Windows и стандартные каталоги установки 1С. В auto-режиме
+версии 8.3.20+ проверяются от новой к старой, а несовместимая версия заменяется
+следующим кандидатом.
+
+## Аутентификация
+
+Поддерживаются режимы `password` (имя администратора и пароль передаются в
+RAC) и `none` (учетные данные не передаются). Доменная аутентификация текущей
+учетной записью Windows не поддерживается: `rac.exe` ее не реализует, поэтому
+соответствующих опций в приложении нет.
+
+## TUI
+
+В TUI доступны подключения к кластерам, credential overrides информационных
+баз, поиск баз, сеансы, соединения, рабочие процессы и диагностика. Основные
+клавиши:
+
+| Клавиша | Действие |
+|---|---|
+| `Tab`, `Shift+Tab`, `Left`, `Right` | Сменить раздел |
+| `1`...`7` | Открыть раздел по номеру |
+| `Up`, `Down`, `PgUp`, `PgDn`, `Home`, `End` | Навигация по таблице |
+| `Enter` | Показать все известные поля строки |
+| `Space` | Отметить сеанс, соединение или рабочий процесс |
+| `F5` | Обновить активную вкладку |
+| `a` | Включить или выключить автообновление |
+| `[` и `]` | Выбрать интервал 5, 10, 30 или 60 секунд |
+| `i` | Задать пользовательский интервал |
+| `/`, `f`, `s`, `c` | Изменить query, фильтр, сортировку или колонки |
+| `g` | Выбрать кластер для фильтрации |
+| `n` | Добавить подключение или credential override |
+| `Delete`, `x` | Удалить подключение или credential override |
+| `k` | Завершить отмеченные объекты после подтверждения |
+| `m` | Переключить мышь между управлением TUI и выделением текста |
+| `?` | Открыть справку |
+| `Esc` | Закрыть окно, отменить задачу или выйти с основного экрана |
+| `q`, `Ctrl+C` | Выйти |
+
+В текстовых полях доступны перемещение каретки стрелками, `Backspace`,
+`Delete` и очистка через `Ctrl+U`. В поле `auth_mode` клавиши `F2`, `Left` и
+`Right` переключают `none`/`password`.
+
+Автообновление по умолчанию выключено. Пользовательский интервал не может быть
+меньше двух секунд; новый запрос не запускается поверх незавершенного.
+
+## Безопасность
+
+Пароли по требованиям приложения хранятся в YAML открытым текстом. Это не
+шифрование, поэтому конфигурационный файл и учетная запись Windows должны быть
+защищены средствами операционной системы.
+
+Пароль, переданный через `--password`, виден в истории PowerShell. RAC также
+принимает пароль аргументом, поэтому он может быть кратковременно виден в
+списке процессов. Технические логи, диагностические сообщения и JSON-ошибки
+маскируют известные приложению секреты.
+
+Технический лог:
 
 ```text
 %LOCALAPPDATA%\onecadmin\logs\onecadmin.log
 ```
 
-The technical log rotates at 10 MiB and keeps five files.
+Лог ротируется при размере 10 MiB; сохраняется пять файлов.
 
-## Verification
+## Коды завершения
+
+| Код | Значение |
+|---:|---|
+| `0` | Успех, включая пустой результат чтения |
+| `1` | Внутренняя ошибка |
+| `2` | Ошибка аргументов, конфигурации или запроса |
+| `3` | Совместимый `rac.exe` не найден |
+| `4` | Ошибка для всех выбранных целей |
+| `5` | Частичный успех |
+| `6` | Требуется подтверждение или операция отменена |
+| `7` | Опасная операция не нашла объектов |
+| `130` | Прерывание пользователем |
+
+## Сборка EXE
+
+Установите stable Rust и Visual Studio Build Tools с компонентами C++, затем
+выполните:
+
+```powershell
+cargo build --release --locked
+target\release\onecadmin.exe --version
+```
+
+Результат находится в `target\release\onecadmin.exe`. Release-профиль и
+`.cargo\config.toml` создают portable EXE со статически связанным CRT.
+Системные DLL Windows, компоненты 1С и внешний `rac.exe` в него не включаются.
+
+## Разработка
+
+Минимальная поддерживаемая версия Rust - 1.88. Основные проверки:
 
 ```powershell
 cargo fmt --all -- --check
@@ -88,4 +258,6 @@ cargo deny check
 cargo llvm-cov --locked --all-features --workspace --all-targets
 ```
 
-The last three commands require `cargo-audit`, `cargo-deny` and `cargo-llvm-cov`. GitHub Actions runs the same dependency policy and coverage checks on every push and pull request, together with stable and Rust 1.88 Windows builds.
+Последние три команды требуют `cargo-audit`, `cargo-deny` и `cargo-llvm-cov`.
+GitHub Actions выполняет проверки зависимостей и покрытия при каждом push и
+pull request вместе со сборками stable и Rust 1.88 под Windows.
