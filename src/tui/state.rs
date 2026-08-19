@@ -647,6 +647,7 @@ impl EditKind {
 pub(crate) struct EditModal {
     pub kind: EditKind,
     pub value: String,
+    pub cursor: usize,
     pub error: Option<String>,
 }
 
@@ -677,6 +678,7 @@ impl FormAuthMode {
 #[derive(Clone)]
 pub(crate) struct ClusterForm {
     pub field: usize,
+    pub cursor: usize,
     pub alias: String,
     pub ras: String,
     pub auth_mode: FormAuthMode,
@@ -689,6 +691,7 @@ impl ClusterForm {
     fn new() -> Self {
         Self {
             field: 0,
+            cursor: 0,
             alias: String::new(),
             ras: String::new(),
             auth_mode: FormAuthMode::None,
@@ -721,13 +724,34 @@ impl ClusterForm {
         ]
     }
 
-    fn edit_value(&mut self) -> Option<&mut String> {
+    fn text_input(&mut self) -> Option<(&mut String, &mut usize)> {
         match self.field {
-            0 => Some(&mut self.alias),
-            1 => Some(&mut self.ras),
-            3 => Some(&mut self.user),
-            4 => Some(&mut self.password),
+            0 => Some((&mut self.alias, &mut self.cursor)),
+            1 => Some((&mut self.ras, &mut self.cursor)),
+            3 => Some((&mut self.user, &mut self.cursor)),
+            4 => Some((&mut self.password, &mut self.cursor)),
             _ => None,
+        }
+    }
+
+    fn move_cursor_to_end(&mut self) {
+        self.cursor = match self.field {
+            0 => self.alias.len(),
+            1 => self.ras.len(),
+            3 => self.user.len(),
+            4 => self.password.len(),
+            _ => 0,
+        };
+    }
+
+    pub(crate) fn cursor_display_width(&self) -> usize {
+        match self.field {
+            0 => UnicodeWidthStr::width(&self.alias[..self.cursor]),
+            1 => UnicodeWidthStr::width(&self.ras[..self.cursor]),
+            2 => UnicodeWidthStr::width(self.auth_mode.label()),
+            3 => UnicodeWidthStr::width(&self.user[..self.cursor]),
+            4 => self.password[..self.cursor].chars().count(),
+            _ => 0,
         }
     }
 }
@@ -741,6 +765,7 @@ impl Drop for ClusterForm {
 #[derive(Clone)]
 pub(crate) struct CredentialForm {
     pub field: usize,
+    pub cursor: usize,
     pub cluster: String,
     pub infobase: String,
     pub infobase_uuid: String,
@@ -752,8 +777,10 @@ pub(crate) struct CredentialForm {
 
 impl CredentialForm {
     fn new(cluster: String) -> Self {
+        let cursor = cluster.len();
         Self {
             field: 0,
+            cursor,
             cluster,
             infobase: String::new(),
             infobase_uuid: String::new(),
@@ -791,14 +818,37 @@ impl CredentialForm {
         ]
     }
 
-    fn edit_value(&mut self) -> Option<&mut String> {
+    fn text_input(&mut self) -> Option<(&mut String, &mut usize)> {
         match self.field {
-            0 => Some(&mut self.cluster),
-            1 => Some(&mut self.infobase),
-            2 => Some(&mut self.infobase_uuid),
-            4 => Some(&mut self.user),
-            5 => Some(&mut self.password),
+            0 => Some((&mut self.cluster, &mut self.cursor)),
+            1 => Some((&mut self.infobase, &mut self.cursor)),
+            2 => Some((&mut self.infobase_uuid, &mut self.cursor)),
+            4 => Some((&mut self.user, &mut self.cursor)),
+            5 => Some((&mut self.password, &mut self.cursor)),
             _ => None,
+        }
+    }
+
+    fn move_cursor_to_end(&mut self) {
+        self.cursor = match self.field {
+            0 => self.cluster.len(),
+            1 => self.infobase.len(),
+            2 => self.infobase_uuid.len(),
+            4 => self.user.len(),
+            5 => self.password.len(),
+            _ => 0,
+        };
+    }
+
+    pub(crate) fn cursor_display_width(&self) -> usize {
+        match self.field {
+            0 => UnicodeWidthStr::width(&self.cluster[..self.cursor]),
+            1 => UnicodeWidthStr::width(&self.infobase[..self.cursor]),
+            2 => UnicodeWidthStr::width(&self.infobase_uuid[..self.cursor]),
+            3 => UnicodeWidthStr::width(self.auth_mode.label()),
+            4 => UnicodeWidthStr::width(&self.user[..self.cursor]),
+            5 => self.password[..self.cursor].chars().count(),
+            _ => 0,
         }
     }
 }
@@ -1525,9 +1575,12 @@ impl App {
                 Vec::new()
             }
             KeyCode::Char('i') | KeyCode::Char('I') => {
+                let value = self.auto_refresh.interval.as_secs().to_string();
+                let cursor = value.len();
                 self.modal = Some(Modal::Edit(EditModal {
                     kind: EditKind::Interval,
-                    value: self.auto_refresh.interval.as_secs().to_string(),
+                    value,
+                    cursor,
                     error: None,
                 }));
                 Vec::new()
@@ -1843,25 +1896,10 @@ impl App {
                         Vec::new()
                     }
                 },
-                KeyCode::Backspace => {
-                    edit.value.pop();
-                    edit.error = None;
-                    self.modal = Some(Modal::Edit(edit));
-                    Vec::new()
-                }
-                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    edit.value.clear();
-                    edit.error = None;
-                    self.modal = Some(Modal::Edit(edit));
-                    Vec::new()
-                }
-                KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    edit.value.push(character);
-                    edit.error = None;
-                    self.modal = Some(Modal::Edit(edit));
-                    Vec::new()
-                }
                 _ => {
+                    if handle_text_input(&mut edit.value, &mut edit.cursor, key) {
+                        edit.error = None;
+                    }
                     self.modal = Some(Modal::Edit(edit));
                     Vec::new()
                 }
@@ -2030,9 +2068,11 @@ impl App {
             EditKind::Columns => settings.columns.clone(),
             EditKind::Interval => String::new(),
         };
+        let cursor = value.len();
         self.modal = Some(Modal::Edit(EditModal {
             kind,
             value,
+            cursor,
             error: None,
         }));
     }
@@ -2403,49 +2443,90 @@ impl App {
 fn handle_cluster_form_input(form: &mut ClusterForm, key: KeyEvent) {
     form.error = None;
     match key.code {
-        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % 5,
-        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + 4) % 5,
+        KeyCode::Tab | KeyCode::Down => {
+            form.field = (form.field + 1) % 5;
+            form.move_cursor_to_end();
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            form.field = (form.field + 4) % 5;
+            form.move_cursor_to_end();
+        }
         KeyCode::F(2) => form.auth_mode = form.auth_mode.next(1),
         KeyCode::Left if form.field == 2 => form.auth_mode = form.auth_mode.next(-1),
         KeyCode::Right | KeyCode::Char(' ') if form.field == 2 => {
             form.auth_mode = form.auth_mode.next(1);
         }
-        KeyCode::Backspace => {
-            if let Some(value) = form.edit_value() {
-                value.pop();
+        _ => {
+            if let Some((value, cursor)) = form.text_input() {
+                handle_text_input(value, cursor, key);
             }
         }
-        KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if let Some(value) = form.edit_value() {
-                value.push(character);
-            }
-        }
-        _ => {}
     }
 }
 
 fn handle_credential_form_input(form: &mut CredentialForm, key: KeyEvent) {
     form.error = None;
     match key.code {
-        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % 6,
-        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + 5) % 6,
+        KeyCode::Tab | KeyCode::Down => {
+            form.field = (form.field + 1) % 6;
+            form.move_cursor_to_end();
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            form.field = (form.field + 5) % 6;
+            form.move_cursor_to_end();
+        }
         KeyCode::F(2) => form.auth_mode = form.auth_mode.next(1),
         KeyCode::Left if form.field == 3 => form.auth_mode = form.auth_mode.next(-1),
         KeyCode::Right | KeyCode::Char(' ') if form.field == 3 => {
             form.auth_mode = form.auth_mode.next(1);
         }
-        KeyCode::Backspace => {
-            if let Some(value) = form.edit_value() {
-                value.pop();
+        _ => {
+            if let Some((value, cursor)) = form.text_input() {
+                handle_text_input(value, cursor, key);
             }
+        }
+    }
+}
+
+fn handle_text_input(value: &mut String, cursor: &mut usize, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Left => {
+            *cursor = value[..*cursor]
+                .char_indices()
+                .next_back()
+                .map_or(0, |(index, _)| index);
+        }
+        KeyCode::Right => {
+            if let Some(character) = value[*cursor..].chars().next() {
+                *cursor += character.len_utf8();
+            }
+        }
+        KeyCode::Backspace => {
+            if *cursor > 0 {
+                let previous = value[..*cursor]
+                    .char_indices()
+                    .next_back()
+                    .map_or(0, |(index, _)| index);
+                value.drain(previous..*cursor);
+                *cursor = previous;
+            }
+        }
+        KeyCode::Delete => {
+            if let Some(character) = value[*cursor..].chars().next() {
+                value.drain(*cursor..*cursor + character.len_utf8());
+            }
+        }
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            value.clear();
+            *cursor = 0;
         }
         KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if let Some(value) = form.edit_value() {
-                value.push(character);
-            }
+            value.insert(*cursor, character);
+            *cursor += character.len_utf8();
         }
-        _ => {}
+        _ => return false,
     }
+    true
 }
 
 fn data_len<T>(state: &LoadState<Vec<T>>) -> usize {
@@ -3150,6 +3231,81 @@ mod tests {
         assert_eq!(edit.value, "m");
         assert!(app.mouse_capture);
         assert!(intents.is_empty());
+    }
+
+    #[test]
+    fn columns_editor_moves_cursor_across_unicode_and_edits_at_position() {
+        let mut app = App::new(&options());
+        app.screen = Screen::Sessions;
+        app.sessions.settings.columns = "aжb".to_owned();
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+
+        let Some(Modal::Edit(edit)) = app.modal.as_ref() else {
+            panic!("ожидался редактор колонок");
+        };
+        assert_eq!(edit.value, "aжxb");
+        assert_eq!(edit.cursor, "aжx".len());
+
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        let Some(Modal::Edit(edit)) = app.modal.as_ref() else {
+            panic!("ожидался редактор колонок");
+        };
+        assert_eq!(edit.value, "aжb");
+        assert_eq!(edit.cursor, "aж".len());
+    }
+
+    #[test]
+    fn delete_removes_unicode_character_after_cursor() {
+        let mut value = "aжb".to_owned();
+        let mut cursor = 1;
+
+        assert!(handle_text_input(
+            &mut value,
+            &mut cursor,
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
+        ));
+
+        assert_eq!(value, "ab");
+        assert_eq!(cursor, 1);
+    }
+
+    #[test]
+    fn cluster_form_edits_text_at_cursor_position() {
+        let mut form = ClusterForm::new();
+        for character in ['a', 'b', 'c'] {
+            handle_cluster_form_input(
+                &mut form,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
+
+        handle_cluster_form_input(&mut form, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        handle_cluster_form_input(
+            &mut form,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
+
+        assert_eq!(form.alias, "abxc");
+        assert_eq!(form.cursor, 3);
+    }
+
+    #[test]
+    fn credential_form_moves_cursor_in_prefilled_field() {
+        let mut form = CredentialForm::new("prod".to_owned());
+
+        handle_credential_form_input(&mut form, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        handle_credential_form_input(
+            &mut form,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
+
+        assert_eq!(form.cluster, "proxd");
+        assert_eq!(form.cursor, 4);
     }
 
     #[test]

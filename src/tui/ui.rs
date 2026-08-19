@@ -619,7 +619,7 @@ fn render_modal(frame: &mut Frame<'_>, modal: &mut Modal) {
             let cursor_x = area
                 .x
                 .saturating_add(3)
-                .saturating_add(UnicodeWidthStr::width(edit.value.as_str()) as u16)
+                .saturating_add(UnicodeWidthStr::width(&edit.value[..edit.cursor]) as u16)
                 .min(area.right().saturating_sub(2));
             frame.set_cursor_position(Position::new(cursor_x, area.y.saturating_add(3)));
         }
@@ -821,6 +821,7 @@ fn render_cluster_form(frame: &mut Frame<'_>, form: &ClusterForm) {
         "Добавление кластера",
         &form.fields(),
         form.field,
+        form.cursor_display_width(),
         form.auth_mode,
         form.error.as_deref(),
     );
@@ -832,6 +833,7 @@ fn render_credential_form(frame: &mut Frame<'_>, form: &CredentialForm) {
         "Добавление credential override",
         &form.fields(),
         form.field,
+        form.cursor_display_width(),
         form.auth_mode,
         form.error.as_deref(),
     );
@@ -842,6 +844,7 @@ fn render_form(
     title: &str,
     fields: &[(&'static str, String, bool)],
     selected: usize,
+    cursor_width: usize,
     auth_mode: FormAuthMode,
     error: Option<&str>,
 ) {
@@ -907,13 +910,12 @@ fn render_form(
         area,
     );
 
-    let (_, value, _) = &fields[selected.min(fields.len().saturating_sub(1))];
     let prefix = 2 + label_width + 2;
     let cursor_x = area
         .x
         .saturating_add(1)
         .saturating_add(prefix as u16)
-        .saturating_add(UnicodeWidthStr::width(value.as_str()) as u16)
+        .saturating_add(cursor_width as u16)
         .min(area.right().saturating_sub(2));
     let cursor_y = area
         .y
