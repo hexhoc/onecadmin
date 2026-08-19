@@ -294,19 +294,43 @@ fn resolved_columns<R: FieldAccess>(
     registry: &FieldRegistry,
     records: &[R],
 ) -> Vec<String> {
-    Projection::parse(
-        (!settings.columns.trim().is_empty()).then_some(settings.columns.trim()),
-        kind,
-        registry,
-    )
-    .map(|projection| projection.resolved_columns(records))
-    .unwrap_or_else(|_| {
-        registry
-            .default_columns(kind)
+    if settings.columns.trim().is_empty() {
+        return tui_default_columns(kind, registry)
             .iter()
             .map(|column| (*column).to_owned())
-            .collect()
-    })
+            .collect();
+    }
+
+    Projection::parse(Some(settings.columns.trim()), kind, registry)
+        .map(|projection| projection.resolved_columns(records))
+        .unwrap_or_else(|_| {
+            tui_default_columns(kind, registry)
+                .iter()
+                .map(|column| (*column).to_owned())
+                .collect()
+        })
+}
+
+const SESSION_TUI_DEFAULT_COLUMNS: &[&str] = &[
+    "cluster",
+    "infobase",
+    "session_id",
+    "user_name",
+    "host",
+    "app_id",
+    "started_at",
+    "duration_current",
+    "memory_current",
+    "read_current",
+    "write_current",
+];
+
+fn tui_default_columns(kind: RecordKind, registry: &FieldRegistry) -> &'static [&'static str] {
+    if kind == RecordKind::Session {
+        SESSION_TUI_DEFAULT_COLUMNS
+    } else {
+        registry.default_columns(kind)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1038,5 +1062,30 @@ const fn auth_mode(mode: AuthMode) -> &'static str {
     match mode {
         AuthMode::None => "none",
         AuthMode::Password => "password",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_tab_uses_current_activity_columns() {
+        assert_eq!(
+            tui_default_columns(RecordKind::Session, &FieldRegistry::new()),
+            [
+                "cluster",
+                "infobase",
+                "session_id",
+                "user_name",
+                "host",
+                "app_id",
+                "started_at",
+                "duration_current",
+                "memory_current",
+                "read_current",
+                "write_current",
+            ]
+        );
     }
 }
